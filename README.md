@@ -14,6 +14,10 @@ A terminal-based network latency monitor. It pings a host continuously and draws
 - Optional CSV logging, one file per hour, stored next to the script
 - No external dependencies on Linux and macOS
 
+# Vibecoded
+
+This application is vibecoded and human edited for good looks for my own use. It is "harmless" in a sense that it does not download nor send data anywhere other than the ping calls. Comes with absolute no warranty.
+
 ## Requirements
 
 ### Linux / macOS
