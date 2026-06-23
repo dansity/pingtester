@@ -42,7 +42,7 @@ pip install windows-curses
 No installation needed. Just clone or download the single file and run it.
 
 ```
-git clone https://github.com/yourname/pingtester.git
+git clone https://github.com/dansity/pingtester
 cd pingtester
 python3 pingtester.py
 ```
