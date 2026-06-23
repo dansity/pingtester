@@ -541,23 +541,29 @@ class App:
         b = curses.color_pair(_BORDER) | curses.A_BOLD
         n = curses.color_pair(_STAT_L)
         t = curses.color_pair(_TITLE) | curses.A_BOLD
+
+        logging_on = bool(self._logger and self._logger.enabled)
+        log_desc   = "● log:ON" if logging_on else "log csv"
+        log_attr   = curses.color_pair(_OK) | curses.A_BOLD if logging_on else n
+
         keys = [
-            ("q",   "quit"),
-            ("h",   "cycle host"),
-            ("H",   "custom host"),
-            ("i",   "interval"),
-            ("t",   "threshold"),
-            ("+/-",  "yscale"),
-            ("◄/►",  "view"),
-            ("l",   "log csv"),
+            ("q",    "quit",        n),
+            ("h",    "cycle host",  n),
+            ("H",    "custom host", n),
+            ("i",    "interval",    n),
+            ("t",    "threshold",   n),
+            ("+/-",  "yscale",      n),
+            ("◄/►",  "view",        n),
+            ("l",    log_desc,      log_attr),
         ]
         x = 2
-        for k, d in keys:
+        for k, d, d_attr in keys:
             if x + len(k) + len(d) + 5 > W - 2:
                 break
-            self._put(row, x, "[", b);          x += 1
-            self._put(row, x, k, t);            x += len(k)
-            self._put(row, x, f"] {d}  ", n);   x += len(d) + 4
+            self._put(row, x, "[", b);           x += 1
+            self._put(row, x, k, t);             x += len(k)
+            self._put(row, x, "] ", n);          x += 2
+            self._put(row, x, d, d_attr);        x += len(d) + 2
 
     # ── input overlay ─────────────────────────────────────────────────────
 
