@@ -19,7 +19,10 @@ Easily generate self contained html report:
 
 # Vibecoded
 
-This application is vibecoded and human edited for good looks for my own use. It is "harmless" in a sense that it does not download nor send data anywhere other than the ping calls. Comes with absolute no warranty.
+This application is vibecoded and human edited for good looks and my own purpose. It is "harmless" in a sense that it does download few generic items and does not send data anywhere other than the ping calls. While it is vibecoded I take privacy seriously. Here are the used online tools:
+The pingtester utility does not download anything. It uses the system's ping utility in a loop.
+The report utility reaches google api for the JetBrains font as well cdn.jsdelivr.net for charts.js file. Feel free to replace the path with your own if you want it fully selfcontained.
+Software comes with absolutely no warranty.
 
 ## Requirements
 
