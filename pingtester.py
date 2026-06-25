@@ -161,6 +161,7 @@ class App:
         self._inp_buf = ""
         self._msg = ""
         self._msg_until = 0.0
+        self._msg_color = _OK
         self._time_idx = 4   # default: TIME_STEPS[4] = 300 s = 5 min
         self._init_curses()
 
@@ -205,9 +206,10 @@ class App:
         b = curses.color_pair(_BORDER) | curses.A_BOLD
         self._put(row, 0, "├" + "─" * (W - 2) + "┤", b)
 
-    def _flash(self, msg: str, secs: float = 2.0):
+    def _flash(self, msg: str, secs: float = 2.0, color: int = _OK):
         self._msg = msg
         self._msg_until = time.monotonic() + secs
+        self._msg_color = color
 
     # ── input handling ───────────────────────────────────────────────────
 
@@ -272,7 +274,22 @@ class App:
         elif k == "l" and self._logger:
             self._logger.enabled = not self._logger.enabled
             self._flash("Logging ON" if self._logger.enabled else "Logging OFF")
+        elif k == "g":
+            self._generate_report()
         return True
+
+    def _generate_report(self):
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "report.py")
+        if not os.path.exists(script):
+            self._flash("report.py not found", secs=3.0, color=_BAR_HI)
+            return
+        subprocess.Popen(
+            [sys.executable, script],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self._flash("Report generating…", color=_BORDER)
 
     def _start_input(self, mode: str):
         self._inp_mode = mode
@@ -344,7 +361,7 @@ class App:
         # flash message
         if self._msg and time.monotonic() < self._msg_until:
             msg = f"  ▸ {self._msg}"
-            self._put(1, W - len(msg) - 2, msg, curses.color_pair(_OK) | curses.A_BOLD)
+            self._put(1, W - len(msg) - 2, msg, curses.color_pair(self._msg_color) | curses.A_BOLD)
 
         self._hline(2, W)
 
@@ -555,6 +572,7 @@ class App:
             ("+/-",  "yscale",      n),
             ("◄/►",  "view",        n),
             ("l",    log_desc,      log_attr),
+            ("g",    "report",      n),
         ]
         x = 2
         for k, d, d_attr in keys:
