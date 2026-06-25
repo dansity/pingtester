@@ -97,6 +97,7 @@ python3 pingtester.py --host 8.8.8.8 --log
 | `+` / `-` | Double or halve the Y-axis scale |
 | `Left` / `Right` (or `,` / `.`) | Zoom the time window in or out |
 | `l` | Toggle CSV logging on or off |
+| `g` | Generate report |
 
 The time window steps are: 1m, 2m, 3m, 5m, 10m, 15m, 30m, 1h, 1h30m, 2h, 3h.
 
