@@ -113,13 +113,6 @@ Columns:
 
 If you enable logging mid-session and a file for the current hour already exists, new rows are appended to it rather than overwriting it.
 
-## Notes
-
-- The history buffer holds up to 15,000 samples, which covers roughly 4 hours at a 1-second interval.
-- When the view window is wider than the available ping history, the left side of the chart is empty until the buffer fills up.
-- When zoomed out enough that multiple pings map to a single column, the bar shows the average for that bucket and the X-axis label shows the aggregation rate (e.g. `10s/col`).
-- Changing the host mid-session does not clear the history. Old samples from the previous host remain in the buffer and will scroll off the left edge as new pings arrive.
-
 # HTML Report
 
 After a logging session you can generate a self-contained HTML report from the CSV files.
