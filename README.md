@@ -3,6 +3,8 @@
 A terminal-based network latency monitor. It pings a host continuously and draws a live bar chart of response times, color-coded by a configurable warning threshold. Useful for watching connection quality over time without setting up anything heavy.
 
 <img width="1901" height="528" alt="image" src="https://github.com/user-attachments/assets/0b2c76dd-6e28-4a31-b113-44ce321e8667" />
+
+Easily generate self contained html report:
 <img width="1570" height="893" alt="image" src="https://github.com/user-attachments/assets/d2f97a89-414b-42f4-a5ea-7df2ed0ac590" />
 
 ## Features
