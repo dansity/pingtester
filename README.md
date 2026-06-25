@@ -3,6 +3,7 @@
 A terminal-based network latency monitor. It pings a host continuously and draws a live bar chart of response times, color-coded by a configurable warning threshold. Useful for watching connection quality over time without setting up anything heavy.
 
 <img width="1901" height="528" alt="image" src="https://github.com/user-attachments/assets/0b2c76dd-6e28-4a31-b113-44ce321e8667" />
+<img width="1570" height="893" alt="image" src="https://github.com/user-attachments/assets/d2f97a89-414b-42f4-a5ea-7df2ed0ac590" />
 
 ## Features
 
@@ -111,6 +112,60 @@ Columns:
 | `ping_ms` | Round-trip time in milliseconds, empty if the packet timed out |
 
 If you enable logging mid-session and a file for the current hour already exists, new rows are appended to it rather than overwriting it.
+
+## Notes
+
+- The history buffer holds up to 15,000 samples, which covers roughly 4 hours at a 1-second interval.
+- When the view window is wider than the available ping history, the left side of the chart is empty until the buffer fills up.
+- When zoomed out enough that multiple pings map to a single column, the bar shows the average for that bucket and the X-axis label shows the aggregation rate (e.g. `10s/col`).
+- Changing the host mid-session does not clear the history. Old samples from the previous host remain in the buffer and will scroll off the left edge as new pings arrive.
+
+# HTML Report
+
+After a logging session you can generate a self-contained HTML report from the CSV files.
+
+```
+python3 report.py [options] [files...]
+```
+
+### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `--output FILE` | `pingtester_report.html` | Output HTML file |
+| `--threshold MS` | 100 | Latency threshold used to classify high-ping events |
+
+### Examples
+
+```bash
+# Report from all CSVs in the current directory
+python3 report.py
+
+# Custom output file and threshold
+python3 report.py --output report.html --threshold 50
+
+# Specific files or glob patterns
+python3 report.py pingtester_2024-11-15_*.csv
+python3 report.py --output night.html pingtester_2024-11-15_2*.csv pingtester_2024-11-15_23.csv
+```
+
+The report is a single HTML file that fetches Chart.js from a CDN on first open; everything else is self-contained.
+
+### Overview tab
+
+- Summary stats: host, session duration, total pings, avg / min / max / p95 latency, packet loss percentage
+- Full-session mini chart showing the entire session at a glance
+- Hourly bar chart with average latency and packet-loss percentage overlay
+- Latency distribution histogram
+- Outage table — every consecutive timeout run of 2 or more packets, with start time, end time, duration, and packet count
+- High-ping periods table — every run of 10+ seconds above the threshold, sorted by average latency
+
+### Timeline tab
+
+- Full-resolution interactive chart covering the entire session; line segments are colored blue below the threshold and red above; timeouts appear as red cross markers; the threshold is drawn as a dashed yellow line
+- Drag horizontally to zoom into a range; scroll to pan; double-click to reset
+- A stats panel below the chart updates live as you zoom: pings, avg, min, max, p95, loss %, timeout count, and outages within the visible window
+- When the visible range contains outages, a detail table for those outages appears below the stats
 
 ## Notes
 
