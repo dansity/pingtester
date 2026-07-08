@@ -29,6 +29,42 @@ except ImportError:
 
 locale.setlocale(locale.LC_ALL, "")
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  USER-EDITABLE CONFIGURATION  —  tweak anything here to taste
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Preset hosts cycled with the 'h' key.
+PRESET_HOSTS = [
+    "8.8.8.8",
+    "1.1.1.1",
+    "9.9.9.9",
+    "hu-bud-as12303.anchors.atlas.ripe.net",
+]
+
+# Startup defaults (each is also overridable via a command-line flag).
+DEFAULT_HOST         = "8.8.8.8"
+DEFAULT_MODE         = "icmp"     # one of: icmp | tcp | http
+DEFAULT_PORT         = 443        # target port used in tcp mode
+DEFAULT_INTERVAL_MS  = 1000       # time between probes (min 100)
+DEFAULT_THRESHOLD_MS = 100.0      # bars above this turn red
+DEFAULT_SCALE_MS     = 200.0      # chart Y-axis full-scale value
+
+# Per-probe network timeouts, in seconds.
+ICMP_TIMEOUT_S = 3    # subprocess timeout for the system `ping`
+TCP_TIMEOUT_S  = 3    # TCP handshake timeout
+HTTP_TIMEOUT_S = 5    # HTTP(S) request timeout
+
+# Sent as the User-Agent header by the HTTP probe.
+HTTP_USER_AGENT = "pingtester"
+
+# View-window steps in seconds (cycled with ◄/►): 1 min → 3 hours.
+TIME_STEPS = [60, 120, 180, 300, 600, 900, 1800, 3600, 5400, 7200, 10800]
+
+# History ring-buffer size in samples (~4 h at a 1 s interval).
+HISTORY_MAXLEN = 15000
+
+# ═══════════════════════════════════════════════════════════════════════════
+
 _BLOCKS = " ▁▂▃▄▅▆▇█"
 
 
@@ -154,7 +190,7 @@ class PingMonitor:
         self.mode = mode if mode in self.MODES else "icmp"
         self.port = port
         self._logger  = logger
-        self._results: deque = deque(maxlen=15000)
+        self._results: deque = deque(maxlen=HISTORY_MAXLEN)
         self._total   = 0      # total pings ever appended (never decrements)
         self._running = True
         self._lock    = threading.Lock()
@@ -182,7 +218,7 @@ class PingMonitor:
                 cmd = ["ping", "-n", "1", "-w", "1000", self.host]
             else:
                 cmd = ["ping", "-c", "1", "-W", "1", self.host]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=ICMP_TIMEOUT_S)
             m = re.search(r"time[=<]([\d.]+)", r.stdout)
             return float(m.group(1)) if m else None
         except Exception:
@@ -212,7 +248,7 @@ class PingMonitor:
         host, port = self._host_port()
         try:
             t0 = time.monotonic()
-            with socket.create_connection((host, port), timeout=3):
+            with socket.create_connection((host, port), timeout=TCP_TIMEOUT_S):
                 return (time.monotonic() - t0) * 1000.0
         except Exception:
             return None
@@ -226,11 +262,11 @@ class PingMonitor:
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
         req = urllib.request.Request(
-            url, method="GET", headers={"User-Agent": "pingtester"}
+            url, method="GET", headers={"User-Agent": HTTP_USER_AGENT}
         )
         t0 = time.monotonic()
         try:
-            with _HTTP_OPENER.open(req, timeout=5) as resp:
+            with _HTTP_OPENER.open(req, timeout=HTTP_TIMEOUT_S) as resp:
                 resp.read(1)   # first byte
                 return (time.monotonic() - t0) * 1000.0
         except urllib.error.HTTPError:
@@ -291,9 +327,8 @@ class PingMonitor:
 
 
 class App:
-    HOSTS = ["8.8.8.8", "1.1.1.1", "9.9.9.9", "hu-bud-as12303.anchors.atlas.ripe.net"]
-    # View window steps in seconds: 1 min → 3 hours
-    TIME_STEPS = [60, 120, 180, 300, 600, 900, 1800, 3600, 5400, 7200, 10800]
+    HOSTS = PRESET_HOSTS            # cycled with 'h' — edit PRESET_HOSTS at top of file
+    TIME_STEPS = TIME_STEPS         # view-window steps — edit TIME_STEPS at top of file
 
     def __init__(self, stdscr, mon: PingMonitor, logger: Optional[CsvLogger] = None):
         self.scr = stdscr
@@ -786,13 +821,13 @@ class App:
 
 def main():
     ap = argparse.ArgumentParser(description="pingtester — CLI latency monitor")
-    ap.add_argument("--host",      default="8.8.8.8",  help="Target host (default: 8.8.8.8)")
-    ap.add_argument("--mode",      default="icmp", choices=PingMonitor.MODES,
-                    help="Probe method: icmp | tcp | http (default: icmp)")
-    ap.add_argument("--port",      type=int,   default=443,   help="TCP-mode port (default: 443)")
-    ap.add_argument("--interval",  type=int,   default=1000,  help="Ping interval ms (default: 1000)")
-    ap.add_argument("--threshold", type=float, default=100.0, help="Warn threshold ms (default: 100)")
-    ap.add_argument("--scale",     type=float, default=200.0, help="Chart Y-scale ms (default: 200)")
+    ap.add_argument("--host",      default=DEFAULT_HOST,  help=f"Target host (default: {DEFAULT_HOST})")
+    ap.add_argument("--mode",      default=DEFAULT_MODE, choices=PingMonitor.MODES,
+                    help=f"Probe method: icmp | tcp | http (default: {DEFAULT_MODE})")
+    ap.add_argument("--port",      type=int,   default=DEFAULT_PORT,   help=f"TCP-mode port (default: {DEFAULT_PORT})")
+    ap.add_argument("--interval",  type=int,   default=DEFAULT_INTERVAL_MS,  help=f"Ping interval ms (default: {DEFAULT_INTERVAL_MS})")
+    ap.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD_MS, help=f"Warn threshold ms (default: {DEFAULT_THRESHOLD_MS:.0f})")
+    ap.add_argument("--scale",     type=float, default=DEFAULT_SCALE_MS, help=f"Chart Y-scale ms (default: {DEFAULT_SCALE_MS:.0f})")
     ap.add_argument("--log",       action="store_true",       help="Enable CSV logging at startup")
     ap.add_argument("--generate-report", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()

@@ -14,6 +14,42 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  USER-EDITABLE CONFIGURATION
+#  External assets the generated HTML loads from a CDN when opened in a browser.
+#  Swap these for self-hosted copies to make the report fully offline/private.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Google Fonts hosts to <link rel="preconnect"> (gstatic serves the font files).
+FONT_PRECONNECT = ["https://fonts.googleapis.com", "https://fonts.gstatic.com"]
+
+# The JetBrains Mono stylesheet.
+FONT_CSS_URL = ("https://fonts.googleapis.com/css2?"
+                "family=JetBrains+Mono:wght@300;400;500;600;700&display=swap")
+
+# Chart.js and the plugins the report needs, loaded in order from jsdelivr.
+CDN_SCRIPTS = [
+    "https://cdn.jsdelivr.net/npm/moment@2.29.4/moment.min.js",
+    "https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js",
+    "https://cdn.jsdelivr.net/npm/chartjs-adapter-moment@1.0.1/dist/chartjs-adapter-moment.min.js",
+    "https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js",
+    "https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js",
+]
+
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _head_assets() -> str:
+    """Build the <link>/<script> tags for the external assets listed above."""
+    tags = []
+    for u in FONT_PRECONNECT:
+        cross = " crossorigin" if "gstatic" in u else ""
+        tags.append(f'<link rel="preconnect" href="{u}"{cross}>')
+    tags.append(f'<link href="{FONT_CSS_URL}" rel="stylesheet">')
+    tags += [f'<script src="{u}"></script>' for u in CDN_SCRIPTS]
+    return "\n".join(tags)
+
+
 # ── data loading ──────────────────────────────────────────────────────────────
 
 def load_csvs(paths: List[str]) -> List[Dict]:
@@ -300,20 +336,15 @@ def generate_report(rows: List[Dict], threshold: float, output_path: str) -> str
     if outages:
         outage_str += f" ({fmt_dur(total_outage_s)} total)"
 
+    head_assets = _head_assets()
+
     html = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PingTester Report — {host_str}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/moment@2.29.4/moment.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment@1.0.1/dist/chartjs-adapter-moment.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+{head_assets}
 <style>
 :root {{
   --bg:       #0a0a0f;
