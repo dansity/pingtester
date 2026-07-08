@@ -1,0 +1,14 @@
+# Runtime CSV logs and generated HTML reports — never commit these
+pingtester_*.csv
+pingtester_report.html
+
+# Build output and intermediate work (build/build.sh + build_windows.bat stay tracked)
+build/dist/
+build/work/
+
+# Claude Code project instructions — keep local only
+CLAUDE.md
+
+# Python
+__pycache__/
+*.py[cod]

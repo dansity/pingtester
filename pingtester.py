@@ -2,16 +2,23 @@
 """pingtester — beautiful CLI network latency monitor"""
 
 import csv
+import glob
 import os
+import socket
+import ssl
 import subprocess
 import sys
 import threading
 import time
 import re
 import math
+import urllib.request
+import urllib.error
+import webbrowser
+from urllib.parse import urlparse
 from collections import deque
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, Tuple
 import argparse
 import locale
 
@@ -23,6 +30,62 @@ except ImportError:
 locale.setlocale(locale.LC_ALL, "")
 
 _BLOCKS = " ▁▂▃▄▅▆▇█"
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Treat 3xx as a final response instead of chasing it to another host —
+    otherwise we'd measure the redirect target (e.g. 8.8.8.8 → dns.google),
+    not the host the user asked for."""
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def _build_http_opener() -> urllib.request.OpenerDirector:
+    ctx = ssl.create_default_context()   # cert validation off: we measure latency, not trust
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=ctx))
+
+
+_HTTP_OPENER = _build_http_opener()
+
+
+def _app_base_dir() -> str:
+    """Where CSV logs and the HTML report live: next to the binary when frozen
+    by PyInstaller, otherwise next to this script."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def run_report_cli(threshold: float) -> None:
+    """Generate the HTML report in-process from the CSVs in the app dir.
+
+    Invoked via the hidden `--generate-report` flag so the single frozen exe
+    can produce its own report by re-invoking itself — no separate report.py
+    needs to ship alongside the binary. `report` is bundled into the exe.
+    """
+    import report   # bundled into the exe via this import (see build.sh)
+
+    base = _app_base_dir()
+    paths = sorted(glob.glob(os.path.join(base, "pingtester_*.csv")))
+    if not paths:
+        print("No pingtester_*.csv files found next to the program.", file=sys.stderr)
+        return
+    rows = report.load_csvs(paths)
+    if not rows:
+        print("No valid data rows found in the CSV files.", file=sys.stderr)
+        return
+    out = os.path.join(base, "pingtester_report.html")
+    html = report.generate_report(rows, threshold, out)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"Report written to: {out}", file=sys.stderr)
+    try:
+        webbrowser.open("file://" + os.path.abspath(out))
+    except Exception:
+        pass
+
 
 # Color pair IDs
 _BORDER = 1
@@ -48,7 +111,7 @@ class CsvLogger:
         self._file = None
         self._writer = None
         self._current_hour: Optional[str] = None
-        self._base_dir = os.path.dirname(os.path.abspath(__file__))
+        self._base_dir = _app_base_dir()
 
     def _rotate(self, hour_key: str):
         if self._file:
@@ -58,10 +121,10 @@ class CsvLogger:
         self._file = open(path, "a", newline="")
         self._writer = csv.writer(self._file)
         if new_file:
-            self._writer.writerow(["host", "timestamp", "ping_ms"])
+            self._writer.writerow(["host", "mode", "timestamp", "ping_ms"])
         self._current_hour = hour_key
 
-    def log(self, host: str, ts: float, ms: Optional[float]):
+    def log(self, host: str, mode: str, ts: float, ms: Optional[float]):
         if not self.enabled:
             return
         hour_key = time.strftime("%Y-%m-%d_%H", time.localtime(ts))
@@ -69,7 +132,7 @@ class CsvLogger:
         with self._lock:
             if hour_key != self._current_hour:
                 self._rotate(hour_key)
-            self._writer.writerow([host, ts_str, f"{ms:.3f}" if ms is not None else ""])
+            self._writer.writerow([host, mode, ts_str, f"{ms:.3f}" if ms is not None else ""])
             self._file.flush()
 
     def close(self):
@@ -80,23 +143,40 @@ class CsvLogger:
 
 
 class PingMonitor:
+    MODES = ["icmp", "tcp", "http"]   # probe method; all yield an (ms, ts) sample
+
     def __init__(self, host: str, interval_ms: int, threshold_ms: float, scale_ms: float,
-                 logger: Optional[CsvLogger] = None):
+                 mode: str = "icmp", port: int = 443, logger: Optional[CsvLogger] = None):
         self.host = host
         self.interval_ms = interval_ms
         self.threshold_ms = threshold_ms
         self.scale_ms = scale_ms
+        self.mode = mode if mode in self.MODES else "icmp"
+        self.port = port
         self._logger  = logger
         self._results: deque = deque(maxlen=15000)
         self._total   = 0      # total pings ever appended (never decrements)
         self._running = True
         self._lock    = threading.Lock()
+        # Reachability of the *current* (mode, host): True/False once probed,
+        # invalidated to None whenever the config changes under us.
+        self._probe_ok:  Optional[bool] = None
+        self._probe_sig: Optional[tuple] = None
         threading.Thread(target=self._loop, daemon=True).start()
 
     def stop(self):
         self._running = False
 
-    def _ping(self) -> Optional[float]:
+    def _probe(self) -> Optional[float]:
+        """Dispatch to the active probe method. Returns latency in ms, or None on failure/timeout."""
+        if self.mode == "tcp":
+            return self._probe_tcp()
+        if self.mode == "http":
+            return self._probe_http()
+        return self._probe_icmp()
+
+    def _probe_icmp(self) -> Optional[float]:
+        """ICMP echo via the OS `ping` binary. Cross-platform (win uses -n/-w, others -c/-W)."""
         try:
             if sys.platform == "win32":
                 cmd = ["ping", "-n", "1", "-w", "1000", self.host]
@@ -108,18 +188,80 @@ class PingMonitor:
         except Exception:
             return None
 
+    def _host_port(self) -> Tuple[str, int]:
+        """Resolve the current host into (hostname, port) for socket-based probes.
+
+        Accepts a bare host, `host:port`, or a full URL; falls back to self.port.
+        """
+        h = self.host.strip()
+        if h.startswith(("http://", "https://")):
+            u = urlparse(h)
+            return u.hostname or h, (u.port or (443 if u.scheme == "https" else 80))
+        # host:port  (single colon → treat as IPv4/hostname + port; IPv6 left untouched)
+        if h.count(":") == 1:
+            host, _, p = h.partition(":")
+            try:
+                return host, int(p)
+            except ValueError:
+                return host, self.port   # unparseable port → drop it, keep the host
+        return h, self.port
+
+    def _probe_tcp(self) -> Optional[float]:
+        """Time a full TCP handshake to host:port. Measures the path real traffic takes,
+        and works through firewalls that allow the port even when ICMP is blocked."""
+        host, port = self._host_port()
+        try:
+            t0 = time.monotonic()
+            with socket.create_connection((host, port), timeout=3):
+                return (time.monotonic() - t0) * 1000.0
+        except Exception:
+            return None
+
+    def _probe_http(self) -> Optional[float]:
+        """Time an HTTP(S) GET to the host's own first response (≈ time-to-first-byte).
+        Redirects are NOT followed — a 3xx counts as the server answering, so we
+        measure the host the user typed, not wherever it redirects.
+        Confirms the actual service is healthy, not just that the box answers."""
+        url = self.host.strip()
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        req = urllib.request.Request(
+            url, method="GET", headers={"User-Agent": "pingtester"}
+        )
+        t0 = time.monotonic()
+        try:
+            with _HTTP_OPENER.open(req, timeout=5) as resp:
+                resp.read(1)   # first byte
+                return (time.monotonic() - t0) * 1000.0
+        except urllib.error.HTTPError:
+            # Any HTTP status (3xx/4xx/5xx) means the server responded — valid sample.
+            return (time.monotonic() - t0) * 1000.0
+        except Exception:
+            return None
+
     def _loop(self):
         while self._running:
             t0 = time.monotonic()
-            ms = self._ping()
+            sig = (self.mode, self.host, self.port)   # config this sample belongs to
+            ms = self._probe()
             result = PingResult(ms=ms, ts=time.time())
             with self._lock:
                 self._results.append(result)
                 self._total += 1
+                self._probe_ok  = ms is not None
+                self._probe_sig = sig
             if self._logger:
-                self._logger.log(self.host, result.ts, result.ms)
+                self._logger.log(self.host, self.mode, result.ts, result.ms)
             sleep = max(0.0, self.interval_ms / 1000.0 - (time.monotonic() - t0))
             time.sleep(sleep)
+
+    def reachable(self) -> Optional[bool]:
+        """Whether the *current* (mode, host, port) is answering.
+        None = not yet probed since the last config change."""
+        with self._lock:
+            if self._probe_sig != (self.mode, self.host, self.port):
+                return None
+            return self._probe_ok
 
     def recent(self, n: int) -> List[PingResult]:
         with self._lock:
@@ -149,7 +291,7 @@ class PingMonitor:
 
 
 class App:
-    HOSTS = ["8.8.8.8", "1.1.1.1", "9.9.9.9", "208.67.222.222"]
+    HOSTS = ["8.8.8.8", "1.1.1.1", "9.9.9.9", "hu-bud-as12303.anchors.atlas.ripe.net"]
     # View window steps in seconds: 1 min → 3 hours
     TIME_STEPS = [60, 120, 180, 300, 600, 900, 1800, 3600, 5400, 7200, 10800]
 
@@ -255,6 +397,12 @@ class App:
             self._flash(f"Host → {self.mon.host}")
         elif k == "H":
             self._start_input("host")
+        elif k == "m":
+            idx = self.mon.MODES.index(self.mon.mode)
+            self.mon.mode = self.mon.MODES[(idx + 1) % len(self.mon.MODES)]
+            self._flash(f"Mode → {self.mon.mode.upper()}")
+        elif k == "p" and self.mon.mode == "tcp":
+            self._start_input("port")
         elif k == "i":
             self._start_input("interval")
         elif k == "t":
@@ -279,17 +427,24 @@ class App:
         return True
 
     def _generate_report(self):
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "report.py")
-        if not os.path.exists(script):
-            self._flash("report.py not found", secs=3.0, color=_BAR_HI)
-            return
-        subprocess.Popen(
-            [sys.executable, script],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        self._flash("Report generating…", color=_BORDER)
+        # Re-invoke ourselves with --generate-report so the report generator can
+        # be bundled into the single exe (frozen) rather than shipped separately.
+        # Frozen: sys.executable IS the app. Otherwise run this script via Python.
+        if getattr(sys, "frozen", False):
+            argv = [sys.executable, "--generate-report"]
+        else:
+            argv = [sys.executable, os.path.abspath(__file__), "--generate-report"]
+        argv += ["--threshold", str(self.mon.threshold_ms)]
+        try:
+            subprocess.Popen(
+                argv,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._flash("Report generating…", color=_BORDER)
+        except Exception:
+            self._flash("Report launch failed", secs=3.0, color=_BAR_HI)
 
     def _start_input(self, mode: str):
         self._inp_mode = mode
@@ -303,6 +458,14 @@ class App:
         if self._inp_mode == "host":
             self.mon.host = v
             self._flash(f"Host → {v}")
+        elif self._inp_mode == "port":
+            try:
+                n = int(v)
+                if 1 <= n <= 65535:
+                    self.mon.port = n
+                    self._flash(f"Port → {n}")
+            except ValueError:
+                pass
         elif self._inp_mode == "interval":
             try:
                 n = int(v)
@@ -348,8 +511,12 @@ class App:
         log_tag = ""
         if self._logger:
             log_tag = "   log: ON" if self._logger.enabled else "   log: off"
+        mode_tag = f"mode: {self.mon.mode}"
+        if self.mon.mode == "tcp":
+            mode_tag += f":{self.mon.port}"
         conf = (
-            f"  host: {self.mon.host}"
+            f"  {mode_tag}"
+            f"   host: {self.mon.host}"
             f"   every: {self.mon.interval_ms}ms"
             f"   warn: >{self.mon.threshold_ms:.0f}ms"
             f"   yscale: {self.mon.scale_ms:.0f}ms"
@@ -358,10 +525,16 @@ class App:
         )
         self._put(1, 1, conf, curses.color_pair(_STAT_L))
 
-        # flash message
-        if self._msg and time.monotonic() < self._msg_until:
+        # top-right notification area: transient flash takes priority, otherwise
+        # a persistent red reminder while in HTTP mode.
+        flash_active = self._msg and time.monotonic() < self._msg_until
+        if flash_active:
             msg = f"  ▸ {self._msg}"
             self._put(1, W - len(msg) - 2, msg, curses.color_pair(self._msg_color) | curses.A_BOLD)
+        elif self.mon.mode == "http" and self.mon.reachable() is False:
+            # HTTP probes are failing → this host isn't actually serving web.
+            msg = "Host isn't answering HTTP — switch to a real webhost"
+            self._put(1, W - len(msg) - 2, msg, curses.color_pair(_BAR_HI) | curses.A_BOLD)
 
         self._hline(2, W)
 
@@ -565,8 +738,13 @@ class App:
 
         keys = [
             ("q",    "quit",        n),
+            ("m",    "mode",        n),
             ("h",    "cycle host",  n),
             ("H",    "custom host", n),
+        ]
+        if self.mon.mode == "tcp":
+            keys.append(("p", "tcp port", n))
+        keys += [
             ("i",    "interval",    n),
             ("t",    "threshold",   n),
             ("+/-",  "yscale",      n),
@@ -588,6 +766,7 @@ class App:
     def _draw_input(self, H: int, W: int):
         prompts = {
             "host":      f"Ping host  [{self.mon.host}]: ",
+            "port":      f"TCP port  [{self.mon.port}]: ",
             "interval":  f"Interval ms  [{self.mon.interval_ms}]: ",
             "threshold": f"Threshold ms  [{self.mon.threshold_ms:.0f}]: ",
         }
@@ -608,14 +787,24 @@ class App:
 def main():
     ap = argparse.ArgumentParser(description="pingtester — CLI latency monitor")
     ap.add_argument("--host",      default="8.8.8.8",  help="Target host (default: 8.8.8.8)")
+    ap.add_argument("--mode",      default="icmp", choices=PingMonitor.MODES,
+                    help="Probe method: icmp | tcp | http (default: icmp)")
+    ap.add_argument("--port",      type=int,   default=443,   help="TCP-mode port (default: 443)")
     ap.add_argument("--interval",  type=int,   default=1000,  help="Ping interval ms (default: 1000)")
     ap.add_argument("--threshold", type=float, default=100.0, help="Warn threshold ms (default: 100)")
     ap.add_argument("--scale",     type=float, default=200.0, help="Chart Y-scale ms (default: 200)")
     ap.add_argument("--log",       action="store_true",       help="Enable CSV logging at startup")
+    ap.add_argument("--generate-report", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
+    # Hidden mode: generate the HTML report and exit (used by the in-app 'g' key).
+    if args.generate_report:
+        run_report_cli(args.threshold)
+        return
+
     logger = CsvLogger(enabled=args.log)
-    mon = PingMonitor(args.host, args.interval, args.threshold, args.scale, logger=logger)
+    mon = PingMonitor(args.host, args.interval, args.threshold, args.scale,
+                      mode=args.mode, port=args.port, logger=logger)
     try:
         curses.wrapper(lambda s: App(s, mon, logger=logger).run())
     except KeyboardInterrupt:

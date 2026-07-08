@@ -23,7 +23,9 @@ def load_csvs(paths: List[str]) -> List[Dict]:
         try:
             with open(path, newline='', encoding='utf-8') as f:
                 for row in csv.DictReader(f):
-                    key = (row.get('host', ''), row.get('timestamp', ''))
+                    # 'mode' column added later; older logs were all ICMP.
+                    mode = (row.get('mode') or 'icmp').strip() or 'icmp'
+                    key = (row.get('host', ''), mode, row.get('timestamp', ''))
                     if key in seen:
                         continue
                     seen.add(key)
@@ -31,7 +33,8 @@ def load_csvs(paths: List[str]) -> List[Dict]:
                         ts = datetime.fromisoformat(row['timestamp'])
                         ms_str = row['ping_ms'].strip()
                         ms = float(ms_str) if ms_str else None
-                        rows.append({'ts': ts, 'ms': ms, 'host': row.get('host', '?')})
+                        rows.append({'ts': ts, 'ms': ms, 'host': row.get('host', '?'),
+                                     'mode': mode})
                     except (ValueError, KeyError):
                         pass
         except OSError as e:
@@ -205,6 +208,7 @@ def generate_report(rows: List[Dict], threshold: float, output_path: str) -> str
         sys.exit("No data found in CSV files.")
 
     hosts = sorted(set(r['host'] for r in rows))
+    modes = sorted(set(r['mode'] for r in rows))
     start_dt = rows[0]['ts']
     end_dt = rows[-1]['ts']
     duration_s = (end_dt - start_dt).total_seconds()
@@ -230,11 +234,19 @@ def generate_report(rows: List[Dict], threshold: float, output_path: str) -> str
             host_rows = [r for r in rows if r['host'] == h]
             per_host[h] = compute_stats(host_rows)
 
+    # Per-mode stats (only meaningful when a session mixed measure methods)
+    per_mode = {}
+    if len(modes) > 1:
+        for m in modes:
+            per_mode[m] = compute_stats([r for r in rows if r['mode'] == m])
+
     generated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     data_json = json.dumps({
         'threshold': threshold,
         'hosts': hosts,
+        'modes': modes,
+        'per_mode': per_mode,
         'start': start_dt.strftime('%Y-%m-%d %H:%M:%S'),
         'end': end_dt.strftime('%Y-%m-%d %H:%M:%S'),
         'duration_s': round(duration_s, 1),
@@ -259,7 +271,31 @@ def generate_report(rows: List[Dict], threshold: float, output_path: str) -> str
     loss_class = 'red' if overall['loss'] > 5 else ('yellow' if overall['loss'] > 0 else 'green')
 
     host_str = ', '.join(hosts)
+    mode_str = ', '.join(m.upper() for m in modes)
     duration_str = fmt_dur(duration_s)
+
+    # Per-method comparison table (only when a session mixed measure methods)
+    per_mode_section = ""
+    if per_mode:
+        per_mode_rows = "".join(
+            f"""<tr>
+        <td>{m.upper()}</td>
+        <td class="num">{per_mode[m]['total']:,}</td>
+        <td class="num">{stat_val(per_mode[m]['avg'])}</td>
+        <td class="num green">{stat_val(per_mode[m]['min'])}</td>
+        <td class="num red">{stat_val(per_mode[m]['max'])}</td>
+        <td class="num">{stat_val(per_mode[m]['p95'])}</td>
+        <td class="num {'red' if per_mode[m]['loss'] > 5 else ('' if per_mode[m]['loss'] == 0 else 'yellow')}">{per_mode[m]['loss']:.2f}%</td>
+      </tr>"""
+            for m in modes
+        )
+        per_mode_section = f"""
+  <div class="section-header">By Measure Method</div>
+  <div class="table-wrap"><table class="data-table">
+    <thead><tr><th>Method</th><th>Pings</th><th>Avg</th><th>Min</th><th>Max</th><th>P95</th><th>Loss</th></tr></thead>
+    <tbody>{per_mode_rows}</tbody>
+  </table></div>
+"""
     outage_str = f"{len(outages)} outage{'s' if len(outages) != 1 else ''}"
     if outages:
         outage_str += f" ({fmt_dur(total_outage_s)} total)"
@@ -645,6 +681,7 @@ body::after {{
   </div>
   <div class="report-meta">
     <span>host: <span class="accent">{host_str}</span></span>
+    <span>method: <span class="accent">{mode_str}</span></span>
     <span>period: <span class="accent">{start_dt.strftime('%Y-%m-%d %H:%M')}</span> → <span class="accent">{end_dt.strftime('%Y-%m-%d %H:%M')}</span></span>
     <span>duration: <span class="accent">{duration_str}</span></span>
     <span>threshold: <span class="accent">{threshold:.0f}ms</span></span>
@@ -664,6 +701,10 @@ body::after {{
     <div class="stat-card wide">
       <div class="stat-label">Host(s)</div>
       <div class="stat-value white">{host_str}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Method</div>
+      <div class="stat-value white">{mode_str}</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Duration</div>
@@ -710,7 +751,7 @@ body::after {{
       <div class="stat-value {'yellow' if high_ping else 'dim'}">{fmt_dur(total_high_s) if total_high_s else '─'}</div>
     </div>
   </div>
-
+{per_mode_section}
   <!-- session overview mini chart -->
   <div class="section-header">Session Overview</div>
   <div class="chart-box">

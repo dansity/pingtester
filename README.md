@@ -9,13 +9,15 @@ Easily generate self contained html report:
 
 ## Features
 
+- Three probe methods, switchable at runtime — **ICMP** echo, **TCP** connect, and **HTTP(S)** request
 - Live scrolling bar chart with sub-row precision using Unicode block characters
 - Blue bars below threshold, red above, timeout markers where packets are lost
-- Configurable ping interval, warning threshold, and Y-axis scale
+- Configurable probe interval, warning threshold, and Y-axis scale
 - Adjustable view window from 1 minute up to 3 hours
 - Stats bar showing min, max, avg, p95 latency and packet loss
 - Optional CSV logging, one file per hour, stored next to the script
-- No external dependencies on Linux and macOS
+- Self-contained HTML report generator
+- No external dependencies on Linux and macOS (Python standard library only)
 
 # Vibecoded
 
@@ -24,6 +26,18 @@ This application is vibecoded and human edited for good looks and my own purpose
 - The report utility reaches google api for the JetBrains font as well cdn.jsdelivr.net for charts.js file. Feel free to replace the path with your own if you want it fully selfcontained.
 
 Software comes with absolutely no warranty.
+
+## Probe methods
+
+`pingtester` can measure latency three different ways. Cycle between them at runtime with `m`, or set one at startup with `--mode`.
+
+| Mode | Measures | Notes |
+|---|---|---|
+| `icmp` | ICMP echo round-trip via the OS `ping` binary | The classic. Often deprioritized or blocked by firewalls, so a timeout may mean "filtered", not "down". |
+| `tcp` | Time to complete a TCP handshake to `host:port` | Measures the path real traffic takes and works through firewalls that allow the port. Confirms a *service* is up, not just an IP. Set the port with `p` / `--port`, or use `host:port` syntax. |
+| `http` | Time to the first response byte of an HTTP(S) GET | Confirms the actual web service is healthy. Redirects are **not** followed, so you measure the host you typed rather than wherever it redirects. TLS certificate validation is disabled — latency is measured, not trust. |
+
+In HTTP mode, if the target isn't actually serving web (e.g. a plain DNS IP), a red reminder appears in the top-right until you point it at a real webhost.
 
 ## Requirements
 
@@ -49,7 +63,7 @@ pip install windows-curses
 No installation needed. Just clone or download the single file and run it.
 
 ```
-git clone https://github.com/dansity/pingtester
+git clone https://github.com/yourname/pingtester.git
 cd pingtester
 python3 pingtester.py
 ```
@@ -71,8 +85,10 @@ python3 pingtester.py [options]
 
 | Option | Default | Description |
 |---|---|---|
-| `--host HOST` | 8.8.8.8 | Host to ping |
-| `--interval MS` | 1000 | Ping interval in milliseconds (minimum 100) |
+| `--host HOST` | 8.8.8.8 | Host to probe (accepts `host`, `host:port`, or a URL) |
+| `--mode MODE` | icmp | Probe method: `icmp`, `tcp`, or `http` |
+| `--port PORT` | 443 | Port used in `tcp` mode |
+| `--interval MS` | 1000 | Probe interval in milliseconds (minimum 100) |
 | `--threshold MS` | 100 | Latency warning threshold in milliseconds |
 | `--scale MS` | 200 | Y-axis full-scale value in milliseconds |
 | `--log` | off | Enable CSV logging at startup |
@@ -84,6 +100,12 @@ python3 pingtester.py
 python3 pingtester.py --host 1.1.1.1 --interval 500
 python3 pingtester.py --host 192.168.1.1 --threshold 10 --scale 50
 python3 pingtester.py --host 8.8.8.8 --log
+
+# TCP handshake latency to a web server on port 443
+python3 pingtester.py --mode tcp --host example.com --port 443
+
+# HTTP(S) time-to-first-byte
+python3 pingtester.py --mode http --host https://example.com
 ```
 
 ### Keybindings
@@ -91,14 +113,16 @@ python3 pingtester.py --host 8.8.8.8 --log
 | Key | Action |
 |---|---|
 | `q` | Quit |
-| `h` | Cycle through preset hosts (8.8.8.8, 1.1.1.1, 9.9.9.9, 208.67.222.222) |
+| `m` | Cycle probe mode (icmp → tcp → http) |
+| `h` | Cycle through preset hosts (8.8.8.8, 1.1.1.1, 9.9.9.9, a RIPE Atlas anchor) |
 | `H` | Enter a custom host |
-| `i` | Change ping interval |
+| `p` | Change the TCP port (only shown in `tcp` mode) |
+| `i` | Change probe interval |
 | `t` | Change warning threshold |
 | `+` / `-` | Double or halve the Y-axis scale |
 | `Left` / `Right` (or `,` / `.`) | Zoom the time window in or out |
 | `l` | Toggle CSV logging on or off |
-| `g` | Generate report |
+| `g` | Generate an HTML report from the logged CSVs |
 
 The time window steps are: 1m, 2m, 3m, 5m, 10m, 15m, 30m, 1h, 1h30m, 2h, 3h.
 
@@ -114,13 +138,14 @@ Columns:
 
 | Column | Description |
 |---|---|
-| `host` | The ping target at the time of the measurement |
+| `host` | The probe target at the time of the measurement |
+| `mode` | Probe method used: `icmp`, `tcp`, or `http` |
 | `timestamp` | Local time in ISO 8601 format (YYYY-MM-DDTHH:MM:SS) |
-| `ping_ms` | Round-trip time in milliseconds, empty if the packet timed out |
+| `ping_ms` | Latency in milliseconds, empty if the probe timed out |
 
-If you enable logging mid-session and a file for the current hour already exists, new rows are appended to it rather than overwriting it.
+If you enable logging mid-session and a file for the current hour already exists, new rows are appended to it rather than overwriting it. CSV files written before the `mode` column existed are still readable by the report — those rows are treated as `icmp`.
 
-# HTML Report
+## HTML Report
 
 After a logging session you can generate a self-contained HTML report from the CSV files.
 
@@ -153,7 +178,8 @@ The report is a single HTML file that fetches Chart.js from a CDN on first open;
 
 ### Overview tab
 
-- Summary stats: host, session duration, total pings, avg / min / max / p95 latency, packet loss percentage
+- Summary stats: host, measure method, session duration, total pings, avg / min / max / p95 latency, packet loss percentage
+- A per-method comparison table when a session mixed probe methods (e.g. you switched from ICMP to TCP mid-run)
 - Full-session mini chart showing the entire session at a glance
 - Hourly bar chart with average latency and packet-loss percentage overlay
 - Latency distribution histogram
