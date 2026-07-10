@@ -36,7 +36,20 @@ CDN_SCRIPTS = [
     "https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js",
 ]
 
+# Log files picked up when no input paths are given. `pingtrace_*` holds
+# traceroute runs, one column per hop; the report reads only their `total_ms`
+# (the destination's RTT) and charts them like any other probe.
+CSV_PATTERNS = ["pingtester_*.csv", "pingtrace_*.csv"]
+
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+def default_csv_paths(base_dir: str) -> List[str]:
+    """Every log file next to the program, across both CSV series."""
+    paths: List[str] = []
+    for pattern in CSV_PATTERNS:
+        paths.extend(glob.glob(os.path.join(base_dir, pattern)))
+    return sorted(paths)
 
 
 def _head_assets() -> str:
@@ -67,7 +80,15 @@ def load_csvs(paths: List[str]) -> List[Dict]:
                     seen.add(key)
                     try:
                         ts = datetime.fromisoformat(row['timestamp'])
-                        ms_str = row['ping_ms'].strip()
+                        # Traceroute logs name the latency column `total_ms` and
+                        # carry a hop per extra column; the hops are ignored here
+                        # and the destination's RTT is treated like any probe.
+                        # An empty value means the probe never got an answer, so
+                        # it counts as loss either way.
+                        if 'ping_ms' in row:
+                            ms_str = (row['ping_ms'] or '').strip()
+                        else:
+                            ms_str = (row['total_ms'] or '').strip()
                         ms = float(ms_str) if ms_str else None
                         rows.append({'ts': ts, 'ms': ms, 'host': row.get('host', '?'),
                                      'mode': mode})
@@ -1387,7 +1408,8 @@ function fmtDur(s) {{
 def main():
     ap = argparse.ArgumentParser(description="pingtester-report — HTML report from CSV logs")
     ap.add_argument('inputs', nargs='*',
-                    help='CSV files or glob patterns (default: pingtester_*.csv in current dir)')
+                    help=f"CSV files or glob patterns (default: {' and '.join(CSV_PATTERNS)} "
+                         "next to this script)")
     ap.add_argument('-o', '--output', default='pingtester_report.html',
                     help='Output HTML file (default: pingtester_report.html)')
     ap.add_argument('--threshold', type=float, default=100.0,
@@ -1405,8 +1427,7 @@ def main():
             else:
                 print(f"Warning: no files matched '{pattern}'", file=sys.stderr)
     else:
-        base = os.path.dirname(os.path.abspath(__file__))
-        paths = sorted(glob.glob(os.path.join(base, 'pingtester_*.csv')))
+        paths = default_csv_paths(os.path.dirname(os.path.abspath(__file__)))
 
     if not paths:
         sys.exit("No CSV files found. Run pingtester with --log to generate them.")
