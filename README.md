@@ -1,6 +1,6 @@
 # pingtester
 
-A terminal-based network latency monitor. It pings a host continuously and draws a live bar chart of response times, color-coded by a configurable warning threshold. Useful for watching connection quality over time without setting up anything heavy.
+A nice looking terminal-based network latency monitor. It performs various tests on a host continuously and draws a live bar chart of response times, color-coded by a configurable warning threshold. It can also run a continuous traceroute, stacking every hop on the path into one bar so you can see *where* the latency comes from. Useful for watching connection quality over time without setting up anything heavy.
 
 <img width="1901" height="528" alt="image" src="https://github.com/user-attachments/assets/0b2c76dd-6e28-4a31-b113-44ce321e8667" />
 
@@ -9,15 +9,14 @@ Easily generate self contained html report:
 
 ## Features
 
-- Three probe methods, switchable at runtime — **ICMP** echo, **TCP** connect, and **HTTP(S)** request
+- Four probe methods, switchable at runtime — **ICMP**, **TCP** connect, **HTTP(S)**, and **traceroute**
+- **Traceroute mode** stacks each hop as a colored block in one bar, so a slow hop stands out
 - Live scrolling bar chart with sub-row precision using Unicode block characters
-- Blue bars below threshold, red above, timeout markers where packets are lost
-- Configurable probe interval, warning threshold, and Y-axis scale
-- Adjustable view window from 1 minute up to 3 hours
-- Stats bar showing min, max, avg, p95 latency and packet loss
-- Optional CSV logging, one file per hour, stored next to the script
-- Self-contained HTML report generator
-- No external dependencies on Linux and macOS (Python standard library only)
+- Customizable colors, interpolated in OKLab so any path length gets a distinguishable ramp
+- Adjustable interval, threshold, Y-scale (auto-fit in traceroute) and view window (1 min – 3 h)
+- Stats bar: min, max, avg, p95, packet loss
+- Optional hourly CSV logging and a self-contained HTML report
+- Python standard library only (Linux and macOS)
 
 # Vibecoded
 
@@ -26,18 +25,6 @@ This application is vibecoded and human edited for good looks and my own purpose
 - The **report** utility itself makes no network calls — it only reads your CSV logs and writes a local HTML file. That file, when opened in a browser, loads the JetBrains Mono font from Google Fonts (`fonts.googleapis.com` / `fonts.gstatic.com`) and Chart.js plus its plugins (moment, adapter, hammer.js, zoom) from `cdn.jsdelivr.net`. No measurement data is sent to them. The URLs live at the top of `report.py` — swap them for self-hosted copies to make the report fully self-contained.
 
 Software comes with absolutely no warranty.
-
-## Probe methods
-
-`pingtester` can measure latency three different ways. Cycle between them at runtime with `m`, or set one at startup with `--mode`.
-
-| Mode | Measures | Notes |
-|---|---|---|
-| `icmp` | ICMP echo round-trip via the OS `ping` binary | The classic. Often deprioritized or blocked by firewalls, so a timeout may mean "filtered", not "down". |
-| `tcp` | Time to complete a TCP handshake to `host:port` | Measures the path real traffic takes and works through firewalls that allow the port. Confirms a *service* is up, not just an IP. Set the port with `p` / `--port`, or use `host:port` syntax. |
-| `http` | Time to the first response byte of an HTTP(S) GET | Confirms the actual web service is healthy. Redirects are **not** followed, so you measure the host you typed rather than wherever it redirects. TLS certificate validation is disabled — latency is measured, not trust. |
-
-In HTTP mode, if the target isn't actually serving web (e.g. a plain DNS IP), a red reminder appears in the top-right until you point it at a real webhost.
 
 ## Requirements
 
@@ -86,11 +73,11 @@ python3 pingtester.py [options]
 | Option | Default | Description |
 |---|---|---|
 | `--host HOST` | 8.8.8.8 | Host to probe (accepts `host`, `host:port`, or a URL) |
-| `--mode MODE` | icmp | Probe method: `icmp`, `tcp`, or `http` |
+| `--mode MODE` | icmp | Probe method: `icmp`, `tcp`, `http`, or `trace` |
 | `--port PORT` | 443 | Port used in `tcp` mode |
-| `--interval MS` | 1000 | Probe interval in milliseconds (minimum 100) |
-| `--threshold MS` | 100 | Latency warning threshold in milliseconds |
-| `--scale MS` | 200 | Y-axis full-scale value in milliseconds |
+| `--interval MS` | 1000 | Probe interval in milliseconds (minimum 100; `trace` is floored at 1000) |
+| `--threshold MS` | 100 | Latency warning threshold in milliseconds (ignored in `trace` mode) |
+| `--scale MS` | 200 | Y-axis full-scale value in milliseconds. Omit it in `trace` mode to let the scale auto-fit the path |
 | `--log` | off | Enable CSV logging at startup |
 
 ### Examples
@@ -106,25 +93,149 @@ python3 pingtester.py --mode tcp --host example.com --port 443
 
 # HTTP(S) time-to-first-byte
 python3 pingtester.py --mode http --host https://example.com
+
+# Continuous traceroute, Y-axis fitted to the path automatically
+python3 pingtester.py --mode trace --host 1.1.1.1
+
+# Traceroute with a fixed Y-axis and per-hop CSV logging
+python3 pingtester.py --mode trace --host example.com --scale 100 --log
 ```
+## Probe methods
+
+`pingtester` can measure latency four different ways. Cycle between them at runtime with `m`, or set one at startup with `--mode`.
+
+| Mode | Measures | Notes |
+|---|---|---|
+| `icmp` | ICMP echo round-trip via the OS `ping` binary | The classic. Often deprioritized or blocked by firewalls, so a timeout may mean "filtered", not "down". |
+| `tcp` | Time to complete a TCP handshake to `host:port` | Measures the path real traffic takes and works through firewalls that allow the port. Confirms a *service* is up, not just an IP. Set the port with `p` / `--port`, or use `host:port` syntax. |
+| `http` | Time to the first response byte of an HTTP(S) GET | Confirms the actual web service is healthy. Redirects are **not** followed, so you measure the host you typed rather than wherever it redirects. TLS certificate validation is disabled — latency is measured, not trust. |
+| `trace` | Round-trip to *every hop* on the path, once per interval | Shows which hop adds the latency, not just the total. Needs the `traceroute` binary (`tracert` on Windows). |
+
+In HTTP mode, if the target isn't actually serving web (e.g. a plain DNS IP), a red reminder appears in the top-right until you point it at a real webhost.
+
+## Traceroute mode
+
+Traceroute mode runs a full traceroute on every interval and draws the result as a single stacked bar. Each hop is one colored block, and a block's height is the latency *that hop adds* over everything before it — so the bar's total height is the destination's round-trip time, and a tall block means you found the slow link.
+
+```
+     50┤
+       │                    ███  ← hop 8 (8.8.8.8), the destination
+       │                   ▇███  ← thin separator line between hops
+       │                   ████
+    25 ┤                   ████
+       │                   ████  ← hop 3, the block that owns most of the latency
+       │                   ████
+       │                   ▇▇▇▇
+       │                   ████  ← hop 2
+       │                   ▇▇▇▇
+       └───────────────────────
+ ▆ 1 192.168.1.1  ▆ 2 192.168.150.1  ▆ 3 77.221.45.178  …  6 *  7 *
+```
+
+A legend under the chart names each hop and shows its color. Hops that never answer (the `*` lines in ordinary traceroute output) keep their number but draw no block and get no swatch.
+
+Details worth knowing:
+
+- **The threshold disappears.** Bar color encodes the hop, not "fast or slow", so the warning line and the `t` keybinding are hidden in this mode.
+- **The Y-scale auto-fits** (`TRACE_AUTO_SCALE`). A stacked bar needs roughly one chart row per hop before every hop gets its own block, and the 200 ms default would squash a 20 ms path into two rows. On entering trace mode the scale is fitted to the path's recent peak and the config row shows `yscale: 50ms (auto)`. Pressing `+` or `-` takes it back under manual control; an explicit `--scale` disables auto-fitting from the start. Leaving trace mode with auto-fit still on restores the scale you had before.
+- **Switching in or out of trace clears the chart**, because a stacked per-hop bar and a single latency bar are not the same measurement. Switching between `icmp`, `tcp`, and `http` keeps the history.
+- **Hop RTTs are not always increasing** — a router can reply faster than the one before it. The running total is clamped so the stack never shrinks, which means the bar's height is the largest RTT on the path (the destination's, on a healthy trace).
+- **Very short bars lose detail.** A character cell can show at most two colors, so when the whole stack is only a row or two tall, some middle hops merge into their neighbours. Auto-fit normally keeps you out of this.
+- Probes are paced at a minimum of one second regardless of `--interval`, since a full traceroute takes about that long.
+- **The chart updates more slowly on Windows.** Linux `traceroute` probes every hop in parallel; `tracert` walks the path one hop at a time and always sends three probes per hop, so a trace that takes about a second on Linux can take several. Silent (`*`) hops cost the most, one full timeout per probe.
+
+Traceroute samples are logged to their own CSV series — see [CSV Logging](#csv-logging).
 
 ### Keybindings
 
 | Key | Action |
 |---|---|
 | `q` | Quit |
-| `m` | Cycle probe mode (icmp → tcp → http) |
+| `m` | Cycle probe mode (icmp → tcp → http → trace) |
 | `h` | Cycle through preset hosts (8.8.8.8, 1.1.1.1, 9.9.9.9, a RIPE Atlas anchor) |
 | `H` | Enter a custom host |
 | `p` | Change the TCP port (only shown in `tcp` mode) |
 | `i` | Change probe interval |
-| `t` | Change warning threshold |
-| `+` / `-` | Double or halve the Y-axis scale |
+| `t` | Change warning threshold (hidden in `trace` mode) |
+| `+` / `-` | Zoom the Y-axis in or out (smaller or larger full-scale value) |
 | `Left` / `Right` (or `,` / `.`) | Zoom the time window in or out |
 | `l` | Toggle CSV logging on or off |
 | `g` | Generate an HTML report from the logged CSVs |
 
 The time window steps are: 1m, 2m, 3m, 5m, 10m, 15m, 30m, 1h, 1h30m, 2h, 3h.
+
+## Customizing the colors
+
+Everything visual lives in one block at the top of `pingtester.py`, under `VISUAL CONFIGURATION`. Colors are plain hex strings — edit them and restart.
+
+### Bar colors
+
+```python
+COLOR_BAR_OK   = "#3d7fd8"   # the part of a bar below the threshold
+COLOR_BAR_WARN = "#ff5555"   # the part above it
+COLOR_BAR_OVER = "#8b0000"   # cap on a bar that ran off the top of the chart
+```
+
+A bar is drawn in `COLOR_BAR_OK` up to the threshold line and `COLOR_BAR_WARN` above it, so only the part that actually breached shows as a warning. Every bar's topmost cell is drawn a shade darker than its body, which caps it rather than letting it dissolve into the background:
+
+```python
+CHART_BAR_TIP_DARKEN = 0.12  # OKLab lightness drop; 0 disables
+```
+
+The darkening happens in OKLab rather than by scaling RGB, so the cap keeps the hue of the bar instead of drifting toward grey.
+
+### The traceroute hop gradient
+
+Hop colors are interpolated between two endpoints, so you pick two hex values and any path length gets a ramp:
+
+```python
+TRACE_GRADIENT_START = "#bfdafc"   # first hop that answers
+TRACE_GRADIENT_END   = "#3d7fd8"   # last hop (the destination)
+```
+
+Interpolation runs in the **OKLab** color space, which is perceptually uniform — equal numeric steps look like equal steps to the eye. Interpolating the same two colors in plain sRGB bunches the steps up in the dark end and drags the intermediate colors through muddy hues, which makes neighbouring hops hard to tell apart.
+
+The ramp is spread across the hops that **answer**, not every hop number. A silent (`*`) hop draws nothing, so including it would spend part of the ramp on a color that never appears and leave the visible hops stopping short of `TRACE_GRADIENT_END`. The ramp is rebuilt whenever the number of answering hops changes, so hop 1 always gets the start color and the destination always gets the end color.
+
+A thin line separates adjacent hop blocks:
+
+```python
+TRACE_HOP_SEPARATOR_PX    = 1                    # thickness in eighths of a row; 0 disables
+TRACE_HOP_SEPARATOR_COLOR = TRACE_GRADIENT_END   # any hex value
+TRACE_MIN_SEGMENT_ROWS    = 1                    # rows guaranteed to each answering hop
+```
+
+The separator is carved out of the block below it, so it costs no bar height. It needs `CHART_SUBCELL_BLEND` (below) and enough room for each hop to hold a whole row — on a bar only a couple of rows tall there is nowhere to draw it.
+
+### Glyphs
+
+```python
+CHART_BLOCKS          = " ▁▂▃▄▅▆▇█"  # the eighth-block ladder; try " ░░▒▒▓▓██" for a chunkier look
+CHART_TIMEOUT_GLYPH   = "╷"          # marks a lost sample at the baseline
+CHART_THRESHOLD_GLYPH = "╌"          # the dashed warning line
+CHART_LEGEND_SWATCH   = "▆"          # the color chip in the traceroute legend
+CHART_Y_AXIS_WIDTH    = 7            # columns reserved for the y-axis labels
+```
+
+### How colors reach the terminal
+
+A character cell can carry one glyph and two colors — a foreground and a background. Where two colors meet *inside* a cell (a bar crossing the threshold, or two hops meeting in a stack), the lower one is drawn as a partial block and the upper one becomes the cell's background, so the boundary lands on the exact pixel instead of snapping to a row edge:
+
+```python
+CHART_SUBCELL_BLEND = True   # False draws flat single-color cells
+```
+
+Turn this off if your terminal renders cell backgrounds oddly. Boundaries then snap to the nearest row, and hop separators are disabled along with it.
+
+```python
+USE_EXACT_TERMINAL_COLORS = True
+```
+
+Terminals only have a fixed palette of 256 colors, and its 6×6×6 RGB cube is coarse enough that adjacent light hops would land on the same entry — a 20-hop grey→blue ramp collapses onto about 10 distinct colors. So when the terminal allows it, `pingtester` redefines palette slots to the exact colors you configured, and restores the original values on exit.
+
+Each color redefines the slot that already holds its **closest match**. That way a terminal which advertises the capability but quietly ignores the request still renders a sane approximation of your ramp, rather than whatever those slots happened to contain. When exact colors aren't available at all, each color claims the nearest palette entry no earlier color has taken, so every hop stays distinguishable even if it drifts slightly off the ideal ramp.
+
+Set this to `False` if your terminal misbehaves; you'll get the nearest-match colors instead.
 
 ## CSV Logging
 
@@ -145,9 +256,32 @@ Columns:
 
 If you enable logging mid-session and a file for the current hour already exists, new rows are appended to it rather than overwriting it. CSV files written before the `mode` column existed are still readable by the report — those rows are treated as `icmp`.
 
+### Traceroute logs
+
+Traceroute samples need one column per hop, which does not fit the flat schema above, so they go to a separate hourly series: `pingtrace_YYYY-MM-DD_HH.csv`. Keeping the two apart means the HTML report's `pingtester_*.csv` glob never picks up a row shape it can't parse.
+
+| Column | Description |
+|---|---|
+| `host` | The probe target at the time of the measurement |
+| `mode` | Always `trace` |
+| `timestamp` | Local time in ISO 8601 format |
+| `total_ms` | The destination's round-trip time, empty if the trace never reached it |
+| `hop01` … `hop20` | One column per hop, up to `TRACE_MAX_HOPS` |
+
+Each hop cell packs the hop's address and its RTT into one value, joined by `CSV_HOP_DELIM` (default `|`). A hop that stayed silent writes an empty cell:
+
+```
+host,mode,timestamp,total_ms,hop01,hop02,hop03,hop04,hop05,hop06,hop07,hop08,...
+8.8.8.8,trace,2026-07-10T09:23:46,18.256,192.168.1.1|0.338,192.168.150.1|8.995,77.221.45.178|18.324,77.221.45.177|18.152,77.221.45.170|18.280,,,8.8.8.8|18.256,...
+```
+
+`total_ms` is empty when the trace ran out of hops before reaching the target — otherwise a path that dies halfway would report the last responding router's RTT as if it were the destination's, and packet loss would read 0%.
+
+The HTML report reads these files alongside the regular ones. It uses `total_ms` as the sample and ignores the hop columns, so a traceroute session charts exactly like any other probe — an empty `total_ms` counts as a lost packet. Trace rows appear as their own row in the per-method comparison table. A dedicated per-hop report may come later.
+
 ## HTML Report
 
-After a logging session you can generate a self-contained HTML report from the CSV files.
+After a logging session you can generate a self-contained HTML report from the CSV files. With no file arguments it reads both `pingtester_*.csv` and `pingtrace_*.csv` from the directory the script lives in.
 
 ```
 python3 report.py [options] [files...]
@@ -163,7 +297,7 @@ python3 report.py [options] [files...]
 ### Examples
 
 ```bash
-# Report from all CSVs in the current directory
+# Report from all CSVs next to the script (both ping and trace logs)
 python3 report.py
 
 # Custom output file and threshold

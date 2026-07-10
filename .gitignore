@@ -1,5 +1,6 @@
 # Runtime CSV logs and generated HTML reports — never commit these
 pingtester_*.csv
+pingtrace_*.csv
 pingtester_report.html
 
 # Build output and intermediate work (build/build.sh + build_windows.bat stay tracked)
