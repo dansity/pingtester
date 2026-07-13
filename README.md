@@ -2,7 +2,10 @@
 
 A nice looking "zero config" terminal-based network latency monitor. It performs various tests on a host continuously and draws a live bar chart of response times, color-coded by a configurable warning threshold. It can also run a continuous traceroute, stacking every hop on the path into one bar so you can see *where* the latency comes from. Useful for watching connection quality over time without setting up anything heavy. All you need to do is clone then run.
 
-<img width="1899" height="533" alt="image" src="https://github.com/user-attachments/assets/6d3342a5-e8ba-4bc7-95f3-1a114bf35891" />
+
+
+https://github.com/user-attachments/assets/86038142-c93f-4875-ba1c-1635ed3a30c9
+
 <img width="1901" height="528" alt="image" src="https://github.com/user-attachments/assets/0b2c76dd-6e28-4a31-b113-44ce321e8667" />
 
 Easily generate self contained html report:
