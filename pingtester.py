@@ -49,6 +49,10 @@ DEFAULT_INTERVAL_MS  = 1000       # time between probes (min 100)
 DEFAULT_THRESHOLD_MS = 100.0      # bars above this are flagged as warnings
 DEFAULT_SCALE_MS     = 200.0      # chart Y-axis full-scale value
 
+# MOS (connection quality, 1.0–5.0) rating bands used to color the stat.
+MOS_GOOD = 4.0    # MOS ≥ this reads as good (toll-quality) — shown green
+MOS_FAIR = 3.6    # MOS ≥ this reads as fair — shown neutral; below is poor (red)
+
 # Per-probe network timeouts, in seconds.
 ICMP_TIMEOUT_S = 3    # subprocess timeout for the system `ping`
 TCP_TIMEOUT_S  = 3    # TCP handshake timeout
@@ -84,10 +88,13 @@ CHART_Y_AXIS_WIDTH    = 7      # columns reserved for the y-axis number labels
 CHART_LEGEND_SWATCH   = "▆"    # per-hop color chip in the traceroute legend
 
 # Single-probe (icmp/tcp/http) bar colors. Hex, mapped to the nearest color
-# the terminal can actually show.
-COLOR_BAR_OK   = "#3d7fd8"     # below threshold
-COLOR_BAR_WARN = "#ff5555"     # above threshold
-COLOR_BAR_OVER = "#8b0000"     # the value ran off the top of the chart (clipped)
+# the terminal can actually show. Each bar is two-tone: its lower ~75% is the
+# base shade and its top ~25% a darker "tip" shade. A bar whose average is at
+# or below the warning threshold is drawn in the OK (blue) pair; the moment it
+# breaches the threshold the whole bar switches to the WARN (red) pair.
+COLOR_BAR_OK   = "#3d7fd8"     # below threshold — bar body (lower 75%)
+COLOR_BAR_WARN = "#ff5555"     # above threshold — bar body (lower 75%)
+COLOR_BAR_OVER = "#8b0000"     # above threshold — the darker-red tip (top 25%)
 
 # ── interface (chrome) colors ────────────────────────────────────────────────
 # These paint the frame, title, config/stat rows and key legend — everything
@@ -109,11 +116,15 @@ UI_COLOR_DIM        = "#7a828e"   # de-emphasised text (also rendered with A_DIM
 # is the only lever on their weight.
 UI_FRAME_BOLD       = False
 
-# Every bar's topmost cell is drawn a shade darker than its body, which caps
-# the bar rather than letting it dissolve into the background. Amount is an
-# OKLab lightness drop; 0 disables. (An off-chart bar caps with COLOR_BAR_OVER
-# instead, so a clipped bar is unmistakable.)
-CHART_BAR_TIP_DARKEN = 0.12
+# The top slice of every bar is drawn a shade darker than its body — the "tip"
+# — which caps the bar rather than letting it dissolve into the background.
+# CHART_BAR_TIP_FRACTION is how much of the bar that tip occupies (0.25 = top
+# quarter). For a warning (red) bar the tip is COLOR_BAR_OVER; for an OK (blue)
+# bar it is COLOR_BAR_OK darkened by CHART_BAR_TIP_DARKEN (an OKLab lightness
+# drop) so the tip tracks whatever OK color a theme picks. Set the fraction to 0
+# for flat single-tone bars.
+CHART_BAR_TIP_FRACTION = 0.25
+CHART_BAR_TIP_DARKEN   = 0.16
 
 # Blend the two colors that meet inside one character cell — the threshold
 # crossing on a single-probe bar, or two hops in a traceroute stack — by
@@ -508,6 +519,29 @@ _DIM    = 8
 _FRAME_ATTR = curses.A_BOLD if UI_FRAME_BOLD else curses.A_NORMAL
 
 
+def compute_jitter(vals):
+    """Mean of the absolute successive differences between consecutive RTTs
+    (packet delay variation — the "average jitter" reported by mtr/iperf).
+    `vals` must be in chronological order. None for fewer than 2 samples."""
+    if len(vals) < 2:
+        return None
+    diffs = [abs(vals[i] - vals[i - 1]) for i in range(1, len(vals))]
+    return sum(diffs) / len(diffs)
+
+
+def compute_mos(avg, jitter, loss_pct):
+    """Connection-quality Mean Opinion Score (1.0–5.0) from the simplified
+    ITU-T G.107 E-model (the common Cisco/PingPlotter RTT-based formula)."""
+    if avg is None:
+        return None
+    eff = avg / 2 + 2 * (jitter or 0) + 10          # effective one-way latency
+    R = 93.2 - (eff / 40 if eff < 160 else (eff - 120) / 10)
+    R -= 2.5 * loss_pct
+    R = max(0.0, min(100.0, R))
+    mos = 1 + 0.035 * R + R * (R - 60) * (100 - R) * 7e-6
+    return max(1.0, min(5.0, mos))
+
+
 @dataclass
 class Hop:
     """One traceroute hop. `host` is None and `ms` is None when the hop stayed
@@ -843,13 +877,19 @@ class PingMonitor:
         lost = n - len(vals)
         if not vals:
             return dict(min=None, max=None, avg=None, p95=None,
+                        jitter=None, mos=None,
                         loss=100.0 if n else 0.0, total=n)
-        s = sorted(vals)
+        s = sorted(vals)                # sorted copy: min/max/p95 only
+        avg = sum(vals) / len(vals)
+        loss = lost / n * 100
+        jitter = compute_jitter(vals)   # vals stays chronological (deque order)
         return dict(
             min=min(vals), max=max(vals),
-            avg=sum(vals) / len(vals),
+            avg=avg,
             p95=s[min(int(len(s) * 0.95), len(s) - 1)],
-            loss=lost / n * 100,
+            jitter=jitter,
+            mos=compute_mos(avg, jitter, loss),
+            loss=loss,
             total=n,
         )
 
@@ -877,7 +917,8 @@ class Theme:
         "COLOR_BAR_OK", "COLOR_BAR_WARN", "COLOR_BAR_OVER",
         "UI_COLOR_BORDER", "UI_COLOR_TITLE", "UI_COLOR_STAT_VALUE",
         "UI_COLOR_STAT_LABEL", "UI_COLOR_OK", "UI_COLOR_ALERT", "UI_COLOR_DIM",
-        "UI_FRAME_BOLD", "CHART_BAR_TIP_DARKEN", "CHART_SUBCELL_BLEND",
+        "UI_FRAME_BOLD", "CHART_BAR_TIP_FRACTION", "CHART_BAR_TIP_DARKEN",
+        "CHART_SUBCELL_BLEND",
         "TRACE_GRADIENT_START", "TRACE_GRADIENT_END", "TRACE_HOP_SEPARATOR_COLOR",
         "TRACE_MIN_SEGMENT_ROWS", "TRACE_HOP_SEPARATOR_PX", "TRACE_SHOW_LEGEND",
     )
@@ -1581,31 +1622,35 @@ class App:
 
     def _flat_spans(self, avg_ms: float, thresh: float, scale: float,
                     bar_rows: int) -> List[Tuple[str, int, int]]:
-        """Split one bar into colored bands, in eighth-of-a-row pixels.
+        """Split one bar into two colored bands, in eighth-of-a-row pixels.
 
-        The bar is the theme's OK color up to the threshold line and its WARN
-        color above it, so only the part that actually breached shows as a
-        warning rather than the whole column flipping color.
+        Each bar is two-tone: its lower part is the base shade and its top
+        `CHART_BAR_TIP_FRACTION` a darker tip. A bar at or below the warning
+        threshold is drawn in the OK (blue) pair; once its average breaches the
+        threshold the *whole* bar flips to the WARN (red) pair, tipped with the
+        darker red — rather than only the part above the line changing color.
         """
-        ok, warn = self.theme.COLOR_BAR_OK, self.theme.COLOR_BAR_WARN
+        if thresh > 0 and avg_ms > thresh:
+            base, tip = self.theme.COLOR_BAR_WARN, self.theme.COLOR_BAR_OVER
+        else:
+            base = self.theme.COLOR_BAR_OK
+            tip  = self._darken(base)
         max_px = bar_rows * 8
         val_px = int(round(min(avg_ms, scale) / scale * max_px))
         if val_px <= 0:
             return []
-        th_px = int(round(min(thresh, scale) / scale * max_px)) if thresh > 0 else 0
-        th_px = max(0, min(th_px, max_px))
-        if val_px <= th_px:
-            return [(ok, 0, val_px)]
+        body_px = int(round(val_px * (1 - self.theme.CHART_BAR_TIP_FRACTION)))
+        body_px = max(0, min(body_px, val_px))
         spans = []
-        if th_px > 0:
-            spans.append((ok, 0, th_px))
-        spans.append((warn, th_px, val_px))
+        if body_px > 0:
+            spans.append((base, 0, body_px))
+        if val_px > body_px:
+            spans.append((tip, body_px, val_px))
         return spans
 
     def _draw_bars_flat(self, columns, bar_x, top, bot, bar_rows, scale, thresh):
-        """One bar per column, banded at the threshold. The topmost cell is
-        capped a shade darker than the band beneath it — or in COLOR_BAR_OVER
-        when the value ran past the top of the chart and the bar was clipped."""
+        """One bar per column. Each bar is two-tone — a base body and a darker
+        tip (see `_flat_spans`) — blue below the threshold, red above it."""
         for col, bucket in enumerate(columns):
             cx = bar_x + col
             if not bucket:
@@ -1623,13 +1668,6 @@ class App:
             cells = self._raster_stack(spans, bar_rows)
             if not cells:
                 continue
-
-            # Cap the bar. In a blended cell the upper color is the background,
-            # so that is what the cap has to replace.
-            tip_hex = self.theme.COLOR_BAR_OVER if avg_ms > scale else self._darken(spans[-1][0])
-            top_r = max(cells)
-            glyph, fg, bg = cells[top_r]
-            cells[top_r] = (glyph, fg, tip_hex) if bg else (glyph, tip_hex, None)
 
             for r, (glyph, fg, bg) in cells.items():
                 row = bot - 2 - r
@@ -1723,13 +1761,22 @@ class App:
                 attr = curses.color_pair(_BAR_HI) | curses.A_BOLD
             self._put(row, W - len(lbl) - 2, lbl, attr)
 
+        mos = st["mos"]
+        if mos is None:
+            mos_val, mos_c = "─", _STAT_V
+        else:
+            mos_val = f"{mos:.1f}"
+            mos_c = _OK if mos >= MOS_GOOD else (_STAT_V if mos >= MOS_FAIR else _BAR_HI)
+
         parts = [
             ("min", ms(st["min"]),  _STAT_V),
             ("max", ms(st["max"]),  _STAT_V),
             ("avg", ms(st["avg"]),  _STAT_V),
             ("p95", ms(st["p95"]),  _STAT_V),
+            ("jit", ms(st["jitter"]), _STAT_V),
             ("loss", f"{st['loss']:.1f}%",
              _BAR_HI if st["loss"] > 5 else (_STAT_V if st["loss"] > 0 else _OK)),
+            ("MOS", mos_val, mos_c),
             ("pkts", str(st["total"]), _DIM),
         ]
 
