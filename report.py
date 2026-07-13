@@ -41,6 +41,10 @@ CDN_SCRIPTS = [
 # (the destination's RTT) and charts them like any other probe.
 CSV_PATTERNS = ["pingtester_*.csv", "pingtrace_*.csv"]
 
+# MOS (connection quality, 1.0–5.0) rating bands — keep in sync with pingtester.py.
+MOS_GOOD = 4.0    # MOS ≥ this reads as good (toll-quality) — shown green
+MOS_FAIR = 3.6    # MOS ≥ this reads as fair; below is poor — shown red
+
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -102,20 +106,49 @@ def load_csvs(paths: List[str]) -> List[Dict]:
 
 # ── statistics ────────────────────────────────────────────────────────────────
 
+def compute_jitter(vals):
+    """Mean of absolute successive RTT differences (packet delay variation).
+    `vals` must be in chronological order. None for fewer than 2 samples."""
+    if len(vals) < 2:
+        return None
+    diffs = [abs(vals[i] - vals[i - 1]) for i in range(1, len(vals))]
+    return sum(diffs) / len(diffs)
+
+
+def compute_mos(avg, jitter, loss_pct):
+    """Connection-quality Mean Opinion Score (1.0–5.0) from the simplified
+    ITU-T G.107 E-model (the common Cisco/PingPlotter RTT-based formula)."""
+    if avg is None:
+        return None
+    eff = avg / 2 + 2 * (jitter or 0) + 10          # effective one-way latency
+    R = 93.2 - (eff / 40 if eff < 160 else (eff - 120) / 10)
+    R -= 2.5 * loss_pct
+    R = max(0.0, min(100.0, R))
+    mos = 1 + 0.035 * R + R * (R - 60) * (100 - R) * 7e-6
+    return max(1.0, min(5.0, mos))
+
+
 def compute_stats(rows: List[Dict]) -> Dict:
-    vals = [r['ms'] for r in rows if r['ms'] is not None]
+    vals = [r['ms'] for r in rows if r['ms'] is not None]   # chronological: rows are ts-sorted
     n = len(rows)
     lost = n - len(vals)
     if not vals:
         return dict(min=None, max=None, avg=None, p95=None,
+                    jitter=None, mos=None,
                     loss=round(100.0 if n else 0.0, 2), total=n)
-    s = sorted(vals)
+    s = sorted(vals)                # sorted copy: min/max/p95 only
+    avg = sum(vals) / len(vals)
+    loss = lost / n * 100
+    jitter = compute_jitter(vals)
+    mos = compute_mos(avg, jitter, loss)
     return dict(
         min=round(min(vals), 3),
         max=round(max(vals), 3),
-        avg=round(sum(vals) / len(vals), 3),
+        avg=round(avg, 3),
         p95=round(s[min(int(len(s) * 0.95), len(s) - 1)], 3),
-        loss=round(lost / n * 100, 2),
+        jitter=round(jitter, 3) if jitter is not None else None,
+        mos=round(mos, 2) if mos is not None else None,
+        loss=round(loss, 2),
         total=n,
     )
 
@@ -325,7 +358,19 @@ def generate_report(rows: List[Dict], threshold: float, output_path: str) -> str
             return na
         return f"{v:.1f}{unit}"
 
+    def mos_cell(v):
+        """A per-mode table <td> for a MOS value, colored by quality band."""
+        if v is None:
+            return '<td class="num dim">─</td>'
+        cls = 'green' if v >= MOS_GOOD else ('red' if v < MOS_FAIR else '')
+        return f'<td class="num {cls}">{v:.1f}</td>'
+
     loss_class = 'red' if overall['loss'] > 5 else ('yellow' if overall['loss'] > 0 else 'green')
+
+    _mos = overall['mos']
+    mos_class = 'dim' if _mos is None else (
+        'green' if _mos >= MOS_GOOD else ('yellow' if _mos >= MOS_FAIR else 'red'))
+    mos_str = '─' if _mos is None else f"{_mos:.1f}"
 
     host_str = ', '.join(hosts)
     mode_str = ', '.join(m.upper() for m in modes)
@@ -342,14 +387,16 @@ def generate_report(rows: List[Dict], threshold: float, output_path: str) -> str
         <td class="num green">{stat_val(per_mode[m]['min'])}</td>
         <td class="num red">{stat_val(per_mode[m]['max'])}</td>
         <td class="num">{stat_val(per_mode[m]['p95'])}</td>
+        <td class="num">{stat_val(per_mode[m]['jitter'])}</td>
         <td class="num {'red' if per_mode[m]['loss'] > 5 else ('' if per_mode[m]['loss'] == 0 else 'yellow')}">{per_mode[m]['loss']:.2f}%</td>
+        {mos_cell(per_mode[m]['mos'])}
       </tr>"""
             for m in modes
         )
         per_mode_section = f"""
   <div class="section-header">By Measure Method</div>
   <div class="table-wrap"><table class="data-table">
-    <thead><tr><th>Method</th><th>Pings</th><th>Avg</th><th>Min</th><th>Max</th><th>P95</th><th>Loss</th></tr></thead>
+    <thead><tr><th>Method</th><th>Pings</th><th>Avg</th><th>Min</th><th>Max</th><th>P95</th><th>Jitter</th><th>Loss</th><th>MOS</th></tr></thead>
     <tbody>{per_mode_rows}</tbody>
   </table></div>
 """
@@ -783,8 +830,16 @@ body::after {{
       <div class="stat-value">{stat_val(overall['p95'])}</div>
     </div>
     <div class="stat-card">
+      <div class="stat-label">Jitter</div>
+      <div class="stat-value">{stat_val(overall['jitter'])}</div>
+    </div>
+    <div class="stat-card">
       <div class="stat-label">Packet Loss</div>
       <div class="stat-value {loss_class}">{overall['loss']:.2f}<span class="stat-unit">%</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">MOS Quality</div>
+      <div class="stat-value {mos_class}">{mos_str}</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Outages</div>
@@ -883,7 +938,9 @@ body::after {{
     <div class="range-stat"><div class="range-stat-label">Min</div><div class="range-stat-value green" id="rs-min">─</div></div>
     <div class="range-stat"><div class="range-stat-label">Max</div><div class="range-stat-value red" id="rs-max">─</div></div>
     <div class="range-stat"><div class="range-stat-label">P95</div><div class="range-stat-value" id="rs-p95">─</div></div>
+    <div class="range-stat"><div class="range-stat-label">Jitter</div><div class="range-stat-value" id="rs-jitter">─</div></div>
     <div class="range-stat"><div class="range-stat-label">Loss</div><div class="range-stat-value" id="rs-loss">─</div></div>
+    <div class="range-stat"><div class="range-stat-label">MOS</div><div class="range-stat-value" id="rs-mos">─</div></div>
     <div class="range-stat"><div class="range-stat-label">Timeouts</div><div class="range-stat-value red" id="rs-timeouts">─</div></div>
     <div class="range-stat"><div class="range-stat-label">Outages</div><div class="range-stat-value red" id="rs-outages">─</div></div>
   </div>
@@ -1323,16 +1380,34 @@ function updateRangeStats() {{
   const lost = timeouts;
   const lossP = total > 0 ? (lost / total * 100) : 0;
 
-  const sorted = [...vals].sort((a,b) => a-b);
+  const sorted = [...vals].sort((a,b) => a-b);   // vals stays chronological for jitter
   const avg = vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : null;
   const p95 = sorted.length ? sorted[Math.min(Math.floor(sorted.length*0.95), sorted.length-1)] : null;
+
+  let jitter = null;
+  if (vals.length >= 2) {{
+    let d = 0;
+    for (let i = 1; i < vals.length; i++) d += Math.abs(vals[i] - vals[i-1]);
+    jitter = d / (vals.length - 1);
+  }}
+  // MOS: simplified ITU-T G.107 E-model; bands match MOS_GOOD/MOS_FAIR (4.0/3.6).
+  let mos = null;
+  if (avg !== null) {{
+    const eff = avg / 2 + 2 * (jitter || 0) + 10;
+    let R = 93.2 - (eff < 160 ? eff / 40 : (eff - 120) / 10);
+    R -= 2.5 * lossP;
+    R = Math.max(0, Math.min(100, R));
+    mos = Math.max(1, Math.min(5, 1 + 0.035*R + R*(R-60)*(100-R)*7e-6));
+  }}
 
   set('rs-total', total.toLocaleString(), 'cyan');
   set('rs-avg',  avg !== null ? avg.toFixed(1)+' ms' : '─', avg > THRESHOLD ? 'red' : '');
   set('rs-min',  sorted.length ? sorted[0].toFixed(1)+' ms' : '─', 'green');
   set('rs-max',  sorted.length ? sorted[sorted.length-1].toFixed(1)+' ms' : '─', 'red');
   set('rs-p95',  p95 !== null ? p95.toFixed(1)+' ms' : '─', p95 > THRESHOLD ? 'red' : '');
+  set('rs-jitter', jitter !== null ? jitter.toFixed(1)+' ms' : '─', '');
   set('rs-loss', lossP.toFixed(2)+'%', lossP > 5 ? 'red' : lossP > 0 ? '' : 'green');
+  set('rs-mos', mos !== null ? mos.toFixed(1) : '─', mos === null ? '' : (mos >= 4.0 ? 'green' : mos >= 3.6 ? '' : 'red'));
   set('rs-timeouts', timeouts.toLocaleString(), timeouts > 0 ? 'red' : 'green');
 
   // Outages within range
