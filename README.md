@@ -153,6 +153,7 @@ Traceroute samples are logged to their own CSV series — see [CSV Logging](#csv
 |---|---|
 | `q` | Quit |
 | `m` | Cycle probe mode (icmp → tcp → http → trace) |
+| `c` | Cycle the color theme (see [Themes](#themes)) |
 | `h` | Cycle through preset hosts (8.8.8.8, 1.1.1.1, 9.9.9.9, a RIPE Atlas anchor) |
 | `H` | Enter a custom host |
 | `p` | Change the TCP port (only shown in `tcp` mode) |
@@ -167,7 +168,30 @@ The time window steps are: 1m, 2m, 3m, 5m, 10m, 15m, 30m, 1h, 1h30m, 2h, 3h.
 
 ## Customizing the colors
 
-Everything visual lives in one block at the top of `pingtester.py`, under `VISUAL CONFIGURATION`. Colors are plain hex strings — edit them and restart.
+Everything visual lives in one block at the top of `pingtester.py`, under `VISUAL CONFIGURATION`. Colors are plain hex strings — edit them and restart. Every knob described below can also be packaged as a **theme** and switched live without editing the source.
+
+### Themes
+
+A theme is any file named `ptheme-<name>.py` in a `themes/` folder next to `pingtester.py`. Press **`c`** in-app to cycle through the available themes; the flash message shows the name you land on.
+
+- **No `themes/` folder (or no `ptheme-*.py` in it)** → the colors defined in `pingtester.py` are used, exactly as before.
+- **`themes/ptheme-default.py` exists** → it becomes the startup theme.
+- The built-in look from `pingtester.py` is always entry 0 in the cycle, so `c` can always loop you back to it.
+
+A theme file simply assigns the visual knobs you want to change at module level; anything you leave out inherits the built-in default. So a whole theme can be as short as:
+
+```python
+# themes/ptheme-green.py
+THEME_NAME     = "green"          # optional; defaults to the filename after "ptheme-"
+COLOR_BAR_OK   = "#00b34a"
+COLOR_BAR_WARN = "#c8ff00"
+TRACE_GRADIENT_START = "#0a3d1a"
+TRACE_GRADIENT_END   = "#7dff9c"
+```
+
+The full set of knobs a theme may override — glyphs (including the block ladder), bar colors, all the interface/chrome colors, the frame weight, sub-cell blending, and the traceroute gradient — is documented in `themes/ptheme-greyscale.py`, which doubles as the reference. A handful of themes ship in the box: **greyscale**, **green**, **red**, **sunset**, and **ocean**. A broken or unreadable theme file is skipped rather than crashing the picker.
+
+The sections below describe each knob in `pingtester.py`; the same names are what a theme file sets.
 
 ### Bar colors
 

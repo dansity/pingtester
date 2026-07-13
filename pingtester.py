@@ -2,6 +2,7 @@
 """pingtester — beautiful CLI network latency monitor"""
 
 import csv
+import glob
 import os
 import socket
 import ssl
@@ -45,7 +46,7 @@ DEFAULT_HOST         = "8.8.8.8"
 DEFAULT_MODE         = "icmp"     # one of: icmp | tcp | http | trace
 DEFAULT_PORT         = 443        # target port used in tcp mode
 DEFAULT_INTERVAL_MS  = 1000       # time between probes (min 100)
-DEFAULT_THRESHOLD_MS = 100.0      # bars above this turn red
+DEFAULT_THRESHOLD_MS = 100.0      # bars above this are flagged as warnings
 DEFAULT_SCALE_MS     = 200.0      # chart Y-axis full-scale value
 
 # Per-probe network timeouts, in seconds.
@@ -86,7 +87,27 @@ CHART_LEGEND_SWATCH   = "▆"    # per-hop color chip in the traceroute legend
 # the terminal can actually show.
 COLOR_BAR_OK   = "#3d7fd8"     # below threshold
 COLOR_BAR_WARN = "#ff5555"     # above threshold
-COLOR_BAR_OVER = "#8b0000"     # dark red: the value ran off the top of the chart
+COLOR_BAR_OVER = "#8b0000"     # the value ran off the top of the chart (clipped)
+
+# ── interface (chrome) colors ────────────────────────────────────────────────
+# These paint the frame, title, config/stat rows and key legend — everything
+# that isn't a chart bar. Like the bar colors above they are hex, mapped through
+# the same palette: on a terminal that allows it they land on the exact shade,
+# on one that doesn't they snap to the nearest color it can show. This pins the
+# chrome to one look everywhere, rather than inheriting the terminal's theme.
+UI_COLOR_BORDER     = "#4ab0b4"   # box frame + section divider lines
+UI_COLOR_TITLE      = "#4ab0b4"   # the "◈ PingTester" title
+UI_COLOR_STAT_VALUE = "#e5c07b"   # numeric stat values, threshold label + line
+UI_COLOR_STAT_LABEL = "#b8c0cc"   # config row and stat labels
+UI_COLOR_OK         = "#6cc79b"   # healthy live-ping readout, "log ON"
+UI_COLOR_ALERT      = "#ff5555"   # timeouts, over-threshold, error notices
+UI_COLOR_DIM        = "#7a828e"   # de-emphasised text (also rendered with A_DIM)
+
+# Divider lines (the ├───┤ rules between sections) and the outer frame are drawn
+# bold by default — heavier and brighter. Set False for the thinnest weight the
+# box-drawing font offers; there is no glyph thinner than a light rule, so this
+# is the only lever on their weight.
+UI_FRAME_BOLD       = False
 
 # Every bar's topmost cell is drawn a shade darker than its body, which caps
 # the bar rather than letting it dissolve into the background. Amount is an
@@ -106,8 +127,8 @@ CHART_SUBCELL_BLEND = True
 # look evenly spaced to the eye instead of bunching up the way naive RGB
 # blending does. The ramp is rebuilt whenever the number of answering hops
 # changes, so hop N is not pinned to a fixed color across path changes.
-TRACE_GRADIENT_START = "#bfdafc"   # blueish grey — the first hop (your router)
-TRACE_GRADIENT_END   = "#3d7fd8"   # the same blue the single-probe bars use
+TRACE_GRADIENT_START = "#4ab0b4"   # the first hop that answers (your router)
+TRACE_GRADIENT_END   = "#5d3e8e"   # the last hop (the destination)
 
 # Give every answering hop at least this many whole rows, so a hop that adds
 # almost no latency still reads as its own block instead of collapsing into a
@@ -483,6 +504,9 @@ _STAT_L = 6
 _OK     = 7
 _DIM    = 8
 
+# Frame/divider attribute derived from UI_FRAME_BOLD (see _init_curses, _hline).
+_FRAME_ATTR = curses.A_BOLD if UI_FRAME_BOLD else curses.A_NORMAL
+
 
 @dataclass
 class Hop:
@@ -830,12 +854,93 @@ class PingMonitor:
         )
 
 
+# ── themes ──────────────────────────────────────────────────────────────────
+#
+# Every knob under "VISUAL CONFIGURATION" can be overridden by a theme. A theme
+# is any  themes/ptheme-<name>.py  that assigns some of the names in
+# Theme.FIELDS at module level; whatever it leaves out inherits pingtester.py's
+# built-in look above. Themes are cycled live in-app with the [c] key.
+#
+#   • No theme files          → the built-in colors in this file are used.
+#   • themes/ptheme-default.py → becomes the startup theme (still cycle-able).
+#
+# The built-in look is itself entry 0 in the cycle, so [c] can always return to
+# it. See the shipped themes/ptheme-*.py files for the format.
+
+class Theme:
+    # Visual knobs a theme may set. Each name here is also a module-level
+    # constant above, which supplies the built-in default when a theme is
+    # silent about it.
+    FIELDS = (
+        "CHART_BLOCKS", "CHART_TIMEOUT_GLYPH", "CHART_THRESHOLD_GLYPH",
+        "CHART_LEGEND_SWATCH",
+        "COLOR_BAR_OK", "COLOR_BAR_WARN", "COLOR_BAR_OVER",
+        "UI_COLOR_BORDER", "UI_COLOR_TITLE", "UI_COLOR_STAT_VALUE",
+        "UI_COLOR_STAT_LABEL", "UI_COLOR_OK", "UI_COLOR_ALERT", "UI_COLOR_DIM",
+        "UI_FRAME_BOLD", "CHART_BAR_TIP_DARKEN", "CHART_SUBCELL_BLEND",
+        "TRACE_GRADIENT_START", "TRACE_GRADIENT_END", "TRACE_HOP_SEPARATOR_COLOR",
+        "TRACE_MIN_SEGMENT_ROWS", "TRACE_HOP_SEPARATOR_PX", "TRACE_SHOW_LEGEND",
+    )
+
+    def __init__(self, name: str, values: dict):
+        self.name = name
+        for f in self.FIELDS:
+            setattr(self, f, values[f])
+
+
+THEME_DIR = os.path.join(_app_base_dir(), "themes")
+
+
+def _builtin_theme() -> "Theme":
+    """The look defined by the constants in pingtester.py itself."""
+    g = globals()
+    return Theme("builtin", {f: g[f] for f in Theme.FIELDS})
+
+
+def _load_theme_file(path: str) -> Optional["Theme"]:
+    """Execute one ptheme-*.py and fold whatever knobs it set over the built-in
+    defaults. A theme that fails to import is skipped rather than crashing the
+    app, so one broken file can't take the whole theme picker down."""
+    ns: dict = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            code = compile(f.read(), path, "exec")
+        exec(code, ns)
+    except Exception:
+        return None
+    g = globals()
+    values = {f: ns.get(f, g[f]) for f in Theme.FIELDS}
+    stem = os.path.basename(path)[len("ptheme-"):-len(".py")]
+    return Theme(str(ns.get("THEME_NAME", stem)), values)
+
+
+def load_themes() -> Tuple[List["Theme"], int]:
+    """Discover selectable themes.
+
+    Returns (themes, default_idx). themes[0] is always the built-in look; any
+    themes/ptheme-*.py files follow in filename order. A themes/ptheme-default.py,
+    if present, sets the startup theme; otherwise the built-in is the default.
+    """
+    themes = [_builtin_theme()]
+    default_idx = 0
+    if os.path.isdir(THEME_DIR):
+        for path in sorted(glob.glob(os.path.join(THEME_DIR, "ptheme-*.py"))):
+            t = _load_theme_file(path)
+            if t is None:
+                continue
+            themes.append(t)
+            if os.path.basename(path) == "ptheme-default.py":
+                default_idx = len(themes) - 1
+    return themes, default_idx
+
+
 class App:
     HOSTS = PRESET_HOSTS            # cycled with 'h' — edit PRESET_HOSTS at top of file
     TIME_STEPS = TIME_STEPS         # view-window steps — edit TIME_STEPS at top of file
 
     def __init__(self, stdscr, mon: PingMonitor, logger: Optional[CsvLogger] = None,
-                 auto_scale: bool = False):
+                 auto_scale: bool = False,
+                 themes: Optional[List[Theme]] = None, theme_idx: int = 0):
         self.scr = stdscr
         self.mon = mon
         self._logger = logger
@@ -853,6 +958,12 @@ class App:
         self._pal_colors: List[str] = []
         self._hop_color_of: List[Optional[str]] = []   # hop index → color, None if silent
         self._dark_cache: dict = {}
+        # Selectable themes cycled with [c]; theme[0] is always the built-in look.
+        self._themes = themes if themes else [_builtin_theme()]
+        self._theme_idx = theme_idx if 0 <= theme_idx < len(self._themes) else 0
+        self.theme = self._themes[self._theme_idx]
+        self.pal: Optional[Palette] = None
+        self._frame_attr = curses.A_NORMAL
         self._init_curses()
 
     @staticmethod
@@ -886,7 +997,8 @@ class App:
         """OKLab gradient across n hops, recomputed only when the path length
         changes so hop→color stays put frame to frame."""
         if n != self._pal_n:
-            self._pal_colors = oklab_gradient(TRACE_GRADIENT_START, TRACE_GRADIENT_END, n)
+            self._pal_colors = oklab_gradient(
+                self.theme.TRACE_GRADIENT_START, self.theme.TRACE_GRADIENT_END, n)
             self._pal_n = n
             self.pal.set_gradient(self._pal_colors)
         return self._pal_colors
@@ -908,16 +1020,38 @@ class App:
         self.scr.timeout(80)
         curses.start_color()
         curses.use_default_colors()
+        self._apply_theme(self.theme)
+
+    def _apply_theme(self, theme: Theme):
+        """Point every visual knob at `theme` and (re)bind the fixed UI color
+        pairs. Safe to call at runtime: the [c] key cycles themes through here.
+
+        Each switch builds a fresh Palette — the previous one first hands back
+        any terminal palette slots it borrowed, then the new theme's hex colors
+        are remapped onto whatever the terminal can show. The hop gradient and
+        the tip-darken cache are reset so they rebuild against the new colors.
+        """
+        self.theme = theme
+        self._frame_attr = curses.A_BOLD if theme.UI_FRAME_BOLD else curses.A_NORMAL
+        self._dark_cache = {}
+        self._pal_n = 0
+        self._pal_colors = []
+        self._hop_color_of = []
+        if self.pal is not None:
+            self.pal.restore()
         bg = -1
-        curses.init_pair(_BORDER, curses.COLOR_CYAN,   bg)
-        curses.init_pair(_TITLE,  curses.COLOR_CYAN,   bg)
-        curses.init_pair(_BAR_OK, curses.COLOR_BLUE,   bg)
-        curses.init_pair(_BAR_HI, curses.COLOR_RED,    bg)
-        curses.init_pair(_STAT_V, curses.COLOR_YELLOW, bg)
-        curses.init_pair(_STAT_L, curses.COLOR_WHITE,  bg)
-        curses.init_pair(_OK,     curses.COLOR_GREEN,  bg)
-        curses.init_pair(_DIM,    curses.COLOR_WHITE,  bg)
+        # Build the palette first: the fixed UI pairs (IDs 1..8) map their hex
+        # through it, exactly like the bars, so the chrome lands on the exact
+        # shade where the terminal allows and the nearest match where it doesn't.
         self.pal = Palette()
+        curses.init_pair(_BORDER, self.pal.color(theme.UI_COLOR_BORDER),     bg)
+        curses.init_pair(_TITLE,  self.pal.color(theme.UI_COLOR_TITLE),      bg)
+        curses.init_pair(_BAR_OK, self.pal.color(theme.COLOR_BAR_OK),        bg)
+        curses.init_pair(_BAR_HI, self.pal.color(theme.UI_COLOR_ALERT),      bg)
+        curses.init_pair(_STAT_V, self.pal.color(theme.UI_COLOR_STAT_VALUE), bg)
+        curses.init_pair(_STAT_L, self.pal.color(theme.UI_COLOR_STAT_LABEL), bg)
+        curses.init_pair(_OK,     self.pal.color(theme.UI_COLOR_OK),         bg)
+        curses.init_pair(_DIM,    self.pal.color(theme.UI_COLOR_DIM),        bg)
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -930,7 +1064,7 @@ class App:
             pass
 
     def _hline(self, row, W):
-        b = curses.color_pair(_BORDER) | curses.A_BOLD
+        b = curses.color_pair(_BORDER) | self._frame_attr
         self._put(row, 0, "├" + "─" * (W - 2) + "┤", b)
 
     def _flash(self, msg: str, secs: float = 2.0, color: int = _OK):
@@ -1005,16 +1139,28 @@ class App:
                     self._auto_scale = False
                     self._scale_before_trace = None
             self._flash(f"Mode → {self.mon.mode.upper()}")
+        elif k in ("c", "C"):
+            # Cycle the color theme. Entry 0 is always the built-in look, so
+            # this always loops back to pingtester.py's own colors.
+            if len(self._themes) > 1:
+                self._theme_idx = (self._theme_idx + 1) % len(self._themes)
+                self._apply_theme(self._themes[self._theme_idx])
+                self._flash(f"Theme → {self.theme.name}", color=_TITLE)
+            else:
+                self._flash("No themes found — add themes/ptheme-*.py", color=_STAT_V)
         elif k == "p" and self.mon.mode == "tcp":
             self._start_input("port")
         elif k == "i":
             self._start_input("interval")
         elif k == "t" and self.mon.mode != "trace":
             self._start_input("threshold")
-        elif k in ("+", "=", "-"):
-            # '+' zooms in: a smaller full-scale value makes the bars bigger.
+        elif k in ("+", "=", "-", "KEY_UP", "KEY_DOWN"):
+            # ↑ / '+' zoom in: a smaller full-scale value makes the bars taller.
+            # ↓ / '-' zoom out. The two arrows pair with ◄/► so the whole chart
+            # is steerable from the four arrow keys; +/- stay as aliases.
             cur = self.mon.scale_ms
-            if k == "-":
+            zoom_out = k in ("-", "KEY_DOWN")
+            if zoom_out:
                 above = [s for s in SCALE_STEPS if s > cur]
                 self.mon.scale_ms = float(above[0] if above else SCALE_STEPS[-1])
             else:
@@ -1101,7 +1247,7 @@ class App:
             self.scr.refresh()
             return
 
-        b  = curses.color_pair(_BORDER) | curses.A_BOLD
+        b  = curses.color_pair(_BORDER) | self._frame_attr
 
         # outer box
         self._put(0,     0, "╭" + "─" * (W - 2) + "╮", b)
@@ -1141,7 +1287,7 @@ class App:
         self._put(1, 1, conf, curses.color_pair(_STAT_L))
 
         # top-right notification area: transient flash takes priority, otherwise
-        # a persistent red reminder while in HTTP mode.
+        # a persistent alert-colored reminder while in HTTP mode.
         flash_active = self._msg and time.monotonic() < self._msg_until
         if flash_active:
             msg = f"  ▸ {self._msg}"
@@ -1164,7 +1310,7 @@ class App:
             self.pal.clear_gradient()
             self._pal_n = 0
             self._hop_color_of = []
-        if (self.mon.mode == "trace" and TRACE_SHOW_LEGEND
+        if (self.mon.mode == "trace" and self.theme.TRACE_SHOW_LEGEND
                 and chart_bot > chart_top + 4):
             chart_bot -= 1
             legend_row = chart_bot
@@ -1247,8 +1393,7 @@ class App:
             out.append(sum(vals) / len(vals) if vals else None)
         return out
 
-    @staticmethod
-    def _hop_spans(hop_ms: List[Optional[float]], color_of: List[Optional[str]],
+    def _hop_spans(self, hop_ms: List[Optional[float]], color_of: List[Optional[str]],
                    scale: float, bar_rows: int) -> List[Tuple[str, int, int]]:
         """Turn per-hop RTTs into stacked [color, start_px, end_px) spans, in
         eighth-of-a-row pixels from the baseline.
@@ -1270,8 +1415,8 @@ class App:
         which pins every bar to the same height and freezes the chart.
         """
         max_px = bar_rows * 8
-        sep = TRACE_HOP_SEPARATOR_PX if CHART_SUBCELL_BLEND else 0
-        min_rows = max(0, TRACE_MIN_SEGMENT_ROWS)
+        sep = self.theme.TRACE_HOP_SEPARATOR_PX if self.theme.CHART_SUBCELL_BLEND else 0
+        min_rows = max(0, self.theme.TRACE_MIN_SEGMENT_ROWS)
 
         cums: List[int] = []      # exact cumulative height of each answering hop
         colors: List[str] = []
@@ -1322,13 +1467,12 @@ class App:
             # carve it from; otherwise the block is drawn whole.
             if sep and k < len(blocks) - 1 and e - s > sep and e % 8 == 0:
                 spans.append((color, s, e - sep))
-                spans.append((TRACE_HOP_SEPARATOR_COLOR, e - sep, e))
+                spans.append((self.theme.TRACE_HOP_SEPARATOR_COLOR, e - sep, e))
             else:
                 spans.append((color, s, e))
         return spans
 
-    @staticmethod
-    def _raster_stack(spans: List[Tuple[str, int, int]],
+    def _raster_stack(self, spans: List[Tuple[str, int, int]],
                       bar_rows: int) -> dict:
         """Rasterize a bar's colored pixel spans into character cells.
 
@@ -1342,6 +1486,8 @@ class App:
         """
         if not spans:
             return {}
+        blocks = self.theme.CHART_BLOCKS
+        blend = self.theme.CHART_SUBCELL_BLEND
         top_px = spans[-1][2]
         cells = {}
         for r in range(bar_rows):
@@ -1352,17 +1498,17 @@ class App:
                 continue
             if hi <= top_px:                       # cell is fully painted
                 if len(cover) == 1:
-                    cells[r] = (_BLOCKS[8], cover[0][0], None)
+                    cells[r] = (blocks[8], cover[0][0], None)
                 else:
                     boundary = cover[0][2] - lo    # where the lowest band ends
-                    if CHART_SUBCELL_BLEND and 1 <= boundary <= 7:
-                        cells[r] = (_BLOCKS[boundary], cover[0][0], cover[-1][0])
+                    if blend and 1 <= boundary <= 7:
+                        cells[r] = (blocks[boundary], cover[0][0], cover[-1][0])
                     else:
-                        cells[r] = (_BLOCKS[8], cover[-1][0], None)
+                        cells[r] = (blocks[8], cover[-1][0], None)
             else:                                  # topmost, partly filled cell
                 frac = min(8, top_px - lo)
                 if frac > 0:
-                    cells[r] = (_BLOCKS[frac], cover[-1][0], None)
+                    cells[r] = (blocks[frac], cover[-1][0], None)
         return cells
 
     def _draw_chart(self, top: int, bot: int, W: int):
@@ -1376,7 +1522,7 @@ class App:
         bar_x = ax + 1
         bar_w = W - bar_x - 1
 
-        b = curses.color_pair(_BORDER) | curses.A_BOLD
+        b = curses.color_pair(_BORDER) | self._frame_attr
 
         # y-axis spine
         for r in range(top, bot - 1):
@@ -1401,7 +1547,7 @@ class App:
             self._put(t_row, ax - len(lbl), lbl, curses.color_pair(_STAT_V))
             self._put(t_row, ax, "┼", curses.color_pair(_STAT_V) | curses.A_BOLD)
             for cx in range(bar_x, bar_x + bar_w):
-                self._put(t_row, cx, CHART_THRESHOLD_GLYPH,
+                self._put(t_row, cx, self.theme.CHART_THRESHOLD_GLYPH,
                           curses.color_pair(_STAT_V) | curses.A_DIM)
 
         # x-axis
@@ -1430,18 +1576,18 @@ class App:
 
     def _darken(self, hexstr: str) -> str:
         if hexstr not in self._dark_cache:
-            self._dark_cache[hexstr] = oklab_darken(hexstr, CHART_BAR_TIP_DARKEN)
+            self._dark_cache[hexstr] = oklab_darken(hexstr, self.theme.CHART_BAR_TIP_DARKEN)
         return self._dark_cache[hexstr]
 
-    @staticmethod
-    def _flat_spans(avg_ms: float, thresh: float, scale: float,
+    def _flat_spans(self, avg_ms: float, thresh: float, scale: float,
                     bar_rows: int) -> List[Tuple[str, int, int]]:
         """Split one bar into colored bands, in eighth-of-a-row pixels.
 
-        The bar is COLOR_BAR_OK up to the threshold line and COLOR_BAR_WARN
-        above it, so only the part that actually breached shows as a warning
-        rather than the whole column flipping color.
+        The bar is the theme's OK color up to the threshold line and its WARN
+        color above it, so only the part that actually breached shows as a
+        warning rather than the whole column flipping color.
         """
+        ok, warn = self.theme.COLOR_BAR_OK, self.theme.COLOR_BAR_WARN
         max_px = bar_rows * 8
         val_px = int(round(min(avg_ms, scale) / scale * max_px))
         if val_px <= 0:
@@ -1449,11 +1595,11 @@ class App:
         th_px = int(round(min(thresh, scale) / scale * max_px)) if thresh > 0 else 0
         th_px = max(0, min(th_px, max_px))
         if val_px <= th_px:
-            return [(COLOR_BAR_OK, 0, val_px)]
+            return [(ok, 0, val_px)]
         spans = []
         if th_px > 0:
-            spans.append((COLOR_BAR_OK, 0, th_px))
-        spans.append((COLOR_BAR_WARN, th_px, val_px))
+            spans.append((ok, 0, th_px))
+        spans.append((warn, th_px, val_px))
         return spans
 
     def _draw_bars_flat(self, columns, bar_x, top, bot, bar_rows, scale, thresh):
@@ -1466,7 +1612,7 @@ class App:
                 continue
             valid = [r.ms for r in bucket if r.ms is not None]
             if not valid:
-                self._put(bot - 2, cx, CHART_TIMEOUT_GLYPH,
+                self._put(bot - 2, cx, self.theme.CHART_TIMEOUT_GLYPH,
                           curses.color_pair(_BAR_HI) | curses.A_DIM)
                 continue
 
@@ -1480,7 +1626,7 @@ class App:
 
             # Cap the bar. In a blended cell the upper color is the background,
             # so that is what the cap has to replace.
-            tip_hex = COLOR_BAR_OVER if avg_ms > scale else self._darken(spans[-1][0])
+            tip_hex = self.theme.COLOR_BAR_OVER if avg_ms > scale else self._darken(spans[-1][0])
             top_r = max(cells)
             glyph, fg, bg = cells[top_r]
             cells[top_r] = (glyph, fg, tip_hex) if bg else (glyph, tip_hex, None)
@@ -1518,7 +1664,7 @@ class App:
             if not hop_ms:
                 continue
             if all(m is None for m in hop_ms):
-                self._put(bot - 2, cx, CHART_TIMEOUT_GLYPH,
+                self._put(bot - 2, cx, self.theme.CHART_TIMEOUT_GLYPH,
                           curses.color_pair(_BAR_HI) | curses.A_DIM)
                 continue
             spans = self._hop_spans(hop_ms, color_of, scale, bar_rows)
@@ -1537,17 +1683,18 @@ class App:
         # Same hop→color mapping the chart just used, so swatches can't drift
         # out of step with the bars.
         color_of = self._hop_color_of
+        swatch = self.theme.CHART_LEGEND_SWATCH
         dim = curses.color_pair(_DIM) | curses.A_DIM
         x = 2
         for i, h in enumerate(hops):
             label = h.host or "*"
-            chunk = f"{CHART_LEGEND_SWATCH} {i + 1} {label}"
+            chunk = f"{swatch} {i + 1} {label}"
             if x + len(chunk) + 2 > W - 2:
                 self._put(row, x, "…", dim)
                 break
             hex_c = color_of[i] if i < len(color_of) else None
             # A silent hop has no segment in the chart, so it gets no swatch.
-            self._put(row, x, CHART_LEGEND_SWATCH if hex_c else " ",
+            self._put(row, x, swatch if hex_c else " ",
                       self.pal.pair(hex_c) | self.pal.bar_attr if hex_c else dim)
             x += 2
             self._put(row, x, f"{i + 1}", dim)
@@ -1609,6 +1756,7 @@ class App:
         keys = [
             ("q",    "quit",        n),
             ("m",    "mode",        n),
+            ("c",    "theme",       n),
             ("h",    "cycle host",  n),
             ("H",    "custom host", n),
         ]
@@ -1618,7 +1766,7 @@ class App:
         if self.mon.mode != "trace":     # no threshold when bars are hop-colored
             keys.append(("t", "threshold", n))
         keys += [
-            ("+/-",  "yscale",      n),
+            ("▲/▼",  "yscale",      n),
             ("◄/►",  "view",        n),
             ("l",    log_desc,      log_attr),
             ("g",    "report",      n),
@@ -1677,10 +1825,12 @@ def main():
     # An explicit --scale is the user's; without one, trace mode fits its own.
     scale = DEFAULT_SCALE_MS if args.scale is None else args.scale
     auto_scale = (args.scale is None and args.mode == "trace" and TRACE_AUTO_SCALE)
+    themes, theme_idx = load_themes()
     mon = PingMonitor(args.host, args.interval, args.threshold, scale,
                       mode=args.mode, port=args.port, logger=logger)
     try:
-        curses.wrapper(lambda s: App(s, mon, logger=logger, auto_scale=auto_scale).run())
+        curses.wrapper(lambda s: App(s, mon, logger=logger, auto_scale=auto_scale,
+                                     themes=themes, theme_idx=theme_idx).run())
     except KeyboardInterrupt:
         pass
     finally:
