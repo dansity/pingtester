@@ -2,6 +2,7 @@
 pingtester_*.csv
 pingtrace_*.csv
 pingtester_report.html
+colorcheck.py
 
 # Build output and intermediate work (build/build.sh + build_windows.bat stay tracked)
 build/dist/
