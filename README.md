@@ -22,9 +22,9 @@ Easily generate self contained html report:
 - Optional hourly CSV logging and a self-contained HTML report
 - Python standard library only (Linux and macOS)
 
-# Vibecoded
+# AI usage on the project
 
-This application is vibecoded and human edited for good looks and my own purpose. It is "harmless" in a sense that it has no telemetry or analytics and sends no data anywhere other than to the target host you are probing. While it is vibecoded I take privacy seriously. Here is exactly what talks to the network:
+This application was created using AI tools and human edited for good looks and my own purpose. It is "harmless" in a sense that it has no telemetry or analytics and sends no data anywhere other than to the target host you are probing. While it is vibecoded I take privacy seriously. Here is exactly what talks to the network:
 - The **pingtester** utility only contacts the target host you choose. In ICMP mode (the default) it runs the system's `ping` utility in a loop. In TCP mode it opens a connection to the target's port. In HTTP mode it fetches the first byte of a GET request (TLS certificate validation is disabled, since it measures latency rather than trust). It has no telemetry and downloads nothing else.
 - The **report** utility itself makes no network calls - it only reads your CSV logs and writes a local HTML file. That file, when opened in a browser, loads the JetBrains Mono font from Google Fonts (`fonts.googleapis.com` / `fonts.gstatic.com`) and Chart.js plus its plugins (moment, adapter, hammer.js, zoom) from `cdn.jsdelivr.net`. No measurement data is sent to them. The URLs live at the top of `report.py` - swap them for self-hosted copies to make the report fully self-contained.
 
